@@ -80,6 +80,34 @@ def compute_goodness(activations: torch.Tensor, metric: GoodnessMetric) -> torch
     raise ValueError(f"Unknown goodness metric: {metric}")
 
 
+def generate_k_proposals(
+    weights: torch.Tensor,
+    candidates: torch.Tensor,
+    K: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Generate K diverse flip proposals for the same layer in parallel.
+
+    Args:
+        weights: Current ternary weights (in_features, out_features).
+        candidates: Flat indices of candidate weights to flip.
+        K: Number of proposals to generate.
+        device: Torch device.
+
+    Returns:
+        Tensor of shape (K, in_features, out_features) with proposed weights.
+    """
+    flat_w = weights.flatten().long().to(device)
+    proposals = flat_w.unsqueeze(0).expand(K, -1).clone()
+    n_cand = candidates.shape[0]
+    flip_masks = torch.rand(K, n_cand, device=device) < 0.5
+    current_vals = proposals[:, candidates]
+    random_offsets = torch.randint(1, 3, (K, n_cand), device=device)
+    new_vals = (current_vals + 1 + random_offsets) % 3 - 1
+    proposals[:, candidates] = torch.where(flip_masks, new_vals, current_vals)
+    return proposals.reshape(K, weights.shape[0], weights.shape[1]).to(torch.int8)
+
+
 class TFLELayer:
     """A single ternary layer with TFLE training capability."""
 
@@ -89,23 +117,31 @@ class TFLELayer:
         out_features: int,
         config: TFLEConfig,
         layer_idx: int = 0,
+        device: torch.device | None = None,
     ):
         self.in_features = in_features
         self.out_features = out_features
         self.config = config
         self.layer_idx = layer_idx
+        self.device = device or torch.device("cpu")
 
-        self.weights = random_ternary(in_features, out_features, config)
+        self.weights = random_ternary(in_features, out_features, config).to(self.device)
 
         trace_dtype = torch.float16 if config.trace_dtype == "float16" else torch.float32
         if config.trace_dtype == "int8":
             trace_dtype = torch.float16  # use float16 internally, quantize on save
 
         if config.separate_pos_neg_traces:
-            self.success_traces = torch.zeros(in_features, out_features, dtype=trace_dtype)
-            self.error_traces = torch.zeros(in_features, out_features, dtype=trace_dtype)
+            self.success_traces = torch.zeros(
+                in_features, out_features, dtype=trace_dtype, device=self.device
+            )
+            self.error_traces = torch.zeros(
+                in_features, out_features, dtype=trace_dtype, device=self.device
+            )
         else:
-            self.traces = torch.zeros(in_features, out_features, dtype=trace_dtype)
+            self.traces = torch.zeros(
+                in_features, out_features, dtype=trace_dtype, device=self.device
+            )
 
         self.error_correlation_history: deque[tuple[torch.Tensor, float]] = deque(
             maxlen=config.error_correlation_window
@@ -178,7 +214,7 @@ class TFLELayer:
                 valid_scores[~valid_mask] = float("-inf")
                 _, guided_idx = torch.topk(valid_scores, min(n_guided, valid_mask.sum().item()))
             else:
-                guided_idx = torch.tensor([], dtype=torch.long, device=flat_traces.device)
+                guided_idx = torch.tensor([], dtype=torch.long, device=self.device)
 
             explore_idx = torch.randint(0, n_weights, (n_explore,), device=flat_traces.device)
             candidates = torch.cat([guided_idx, explore_idx]).unique()
@@ -200,7 +236,7 @@ class TFLELayer:
                 r, c = idx // self.out_features, idx % self.out_features
                 if self.cooldown_map.get((r, c), 0) <= 0:
                     valid.append(idx)
-            candidates = torch.tensor(valid, dtype=torch.long) if valid else candidates[:1]
+            candidates = torch.tensor(valid, dtype=torch.long, device=self.device) if valid else candidates[:1]
 
         # Filter out tabu entries
         if cfg.tabu_list_size > 0:
@@ -212,7 +248,7 @@ class TFLELayer:
                 if (r, c, int(current_val)) not in self.tabu_set:
                     valid.append(idx)
             if valid:
-                candidates = torch.tensor(valid, dtype=torch.long)
+                candidates = torch.tensor(valid, dtype=torch.long, device=self.device)
 
         return candidates
 
@@ -230,7 +266,7 @@ class TFLELayer:
         # Strategy: add a random offset of +1 or +2 (mod 3), then map back to {-1, 0, 1}
         # Trit values -1, 0, 1 map to indices 0, 1, 2
         idx_vals = (current_vals.long() + 1)  # map to 0, 1, 2
-        offsets = torch.randint(1, 3, (n,), device=candidates.device)  # +1 or +2
+        offsets = torch.randint(1, 3, (n,), device=self.device)  # +1 or +2
         new_idx = (idx_vals + offsets) % 3
         new_vals = (new_idx - 1).to(proposed.dtype)  # map back to -1, 0, 1
 

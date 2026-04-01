@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+import torch
+
 
 class InitMethod(Enum):
     BALANCED_RANDOM = "balanced_random"
@@ -75,6 +77,9 @@ class FitnessType(Enum):
     COMPRESSION = "compression"
     HYBRID = "hybrid"
     TASK_LOSS = "task_loss"  # Use model-level cross-entropy as fitness signal
+    CDLL = "cdll"  # Compression-Driven Layer Learning (local)
+    MONO_FORWARD = "mono_forward"  # Local classifier heads (local)
+    HYBRID_LOCAL = "hybrid_local"  # CDLL + mono-forward combined (local)
 
 
 class CorruptionMethod(Enum):
@@ -215,6 +220,33 @@ class TFLEConfig:
     log_trace_statistics: bool = True
     log_acceptance_rate: bool = True
 
+    # --- 13. Device and Parallelism ---
+    device: str = "auto"  # "auto" | "cuda" | "mps" | "cpu"
+    num_parallel_proposals: int = 32
+    proposal_diversity: float = 0.5
+    pin_memory: bool = True
+    num_workers: int = 4
+
+    # --- 14. CDLL Parameters ---
+    cdll_alpha: float = 1.0  # entropy penalty weight
+    cdll_beta: float = 1.0  # mutual info reward weight
+    cdll_depth_alpha_scale: float = 1.3  # deeper layers compress more
+    cdll_n_bins: int = 20  # histogram bins for entropy estimation
+    cdll_reconstruction: bool = False  # use reconstruction proxy
+
+    # --- 15. Local Classifier Heads ---
+    local_head_hidden: int = 64  # hidden dim of local classifier
+    local_head_lr: float = 0.01  # learning rate for local heads
+    local_head_lambda: float = 0.5  # weight for CDLL in hybrid_local mode
+
+    # --- 16. SWT (Sleep-Wake Training) ---
+    swt_enabled: bool = False
+    swt_replay_buffer_size: int = 10000
+    swt_ewc_lambda: float = 5000.0
+    swt_frequency_tasks: int = 100
+    swt_consolidation_steps: int = 500
+    swt_adversarial_rounds: int = 3
+
     # --- Model architecture (not in param tables but needed) ---
     layer_sizes: list[int] = field(default_factory=lambda: [784, 512, 256, 10])
     learning_rate_ste: float = 0.001  # for backprop baseline
@@ -228,3 +260,17 @@ class TFLEConfig:
         if self.depth_scaled_temperature:
             return base_temp * (self.temperature_depth_scale ** layer_idx)
         return base_temp
+
+
+def resolve_device(config: TFLEConfig) -> torch.device:
+    """Resolve the device string from config to a torch.device.
+
+    "auto" picks the best available: cuda > mps > cpu.
+    """
+    if config.device == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(config.device)

@@ -6,13 +6,31 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from torch.utils.data import DataLoader
+import torch
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from .annealing import TemperatureScheduler
 from .config import TFLEConfig
 from .model import TFLEModel
 from .monitor import ConvergenceMonitor
+
+
+def make_dataloader(
+    dataset: Dataset,
+    batch_size: int,
+    config: TFLEConfig,
+    shuffle: bool = True,
+) -> DataLoader:
+    """Create a DataLoader using pin_memory and num_workers from config."""
+    use_pin = config.pin_memory and torch.cuda.is_available()
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=config.num_workers,
+        pin_memory=use_pin,
+    )
 
 
 @dataclass
