@@ -17,25 +17,25 @@ python server/launch.py --config my.yaml    # Custom config
 
 ## Algorithm Integrity Rules
 
-**TFLE is one proposal per step. Do NOT batch proposals.**
+**TFLE trains layers SEQUENTIALLY when using task-loss fitness.**
+Each layer's accepted flips change the model, which affects the next layer's
+fitness evaluation. Layers must be trained in order.
 
-The algorithm works like this:
-1. Select candidates (weighted by temporal credit traces)
-2. Propose ONE set of flips
-3. Evaluate fitness before/after (two forward passes)
-4. Accept or reject (simulated annealing)
-5. Update traces based on the accept/reject outcome
-6. Step N's traces inform step N+1's candidate selection
+**Within-layer batched proposals (K>1) ARE safe and encouraged.**
+Generating K flip proposals for the SAME layer and picking the best is just
+smarter search. The traces learn from the single accept/reject outcome.
+This is how Evolution Strategies work. Use K=32-256 for small models.
 
-The traces learn from every single accept/reject decision sequentially.
-This is what makes TFLE an intelligent evolutionary search, not random search.
+**Cross-layer parallel training IS safe with local fitness (CDLL/Mono-Forward).**
+If each layer has its own fitness function that only depends on that layer's
+input and output, all layers can train simultaneously. This is the path to
+GPU saturation at scale. Build CDLL first.
 
-**Batching multiple proposals breaks this.** If you evaluate 32 proposals at once
-and pick the best, the traces don't learn from the 31 rejected ones. The search
-degenerates to random search with selection — faster but dumber.
+**Cross-layer parallel training is NOT safe with task-loss fitness.**
+Task-loss requires full-model forward passes. Layer 0's accepted changes
+affect layer 1's fitness. Parallel here = evaluating against stale weights.
 
-If you need speed, optimize the forward pass or write a CUDA kernel.
-Do NOT parallelize the proposal-evaluate-accept loop.
+See `docs/NOVA_GPU_ACCELERATION_CC_OUTLINE.md` for the full implementation plan.
 
 ## GPU Usage
 
@@ -51,9 +51,13 @@ milliseconds. The GPU is idle 97% of the time waiting for Python.
 - Moving weights to GPU — avoids CPU↔GPU data transfer
 - Vectorized flip proposals — removed the Python for-loop
 
-**What does NOT help (and breaks the algorithm):**
-- Batching multiple proposals per step
-- Parallelizing the train_step across layers (they're sequential by design)
+**What does NOT help with task-loss:**
+- Parallelizing across layers (they're sequential with task-loss)
+
+**What DOES help (and should be implemented):**
+- K>1 within-layer proposals — same layer, pick best of K, GPU-parallel
+- CDLL local fitness — enables cross-layer parallelism
+- Cached prefix/suffix — only recompute the varying layer, not full model
 
 **Expected GPU utilization by model size:**
 - 500K params: ~5-10%
