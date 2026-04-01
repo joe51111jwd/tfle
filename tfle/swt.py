@@ -139,14 +139,15 @@ class SleepWakeTrainer:
         self.fisher_info: dict[int, torch.Tensor] = {}
         self.optimal_weights: dict[int, torch.Tensor] = {}
 
-        # Micro-critics: one per layer
+        # Micro-critics: one per layer, on that layer's device
         self.micro_critics = []
-        for layer in model.layers:
+        for i, layer in enumerate(model.layers):
+            dev = model.device_map[i] if model.multi_gpu else self.device
             self.micro_critics.append(
                 MicroCritic(
                     input_dim=layer.out_features,
                     hidden_dim=min(64, layer.out_features),
-                    device=self.device,
+                    device=dev,
                 )
             )
 

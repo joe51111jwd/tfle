@@ -58,10 +58,13 @@ def random_ternary(rows: int, cols: int, config: TFLEConfig) -> torch.Tensor:
 def ternary_matmul(x: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     """Efficient ternary matrix multiplication.
 
-    For ternary weights, multiply becomes add/subtract/skip:
-    w=+1 -> add input, w=-1 -> subtract input, w=0 -> skip
+    Uses float16 on CUDA for tensor core acceleration (~2x vs float32).
+    Falls back to matching dtype on CPU/MPS.
     """
     if weights.dtype == torch.int8:
+        if x.is_cuda and x.dtype == torch.float32:
+            # float16 matmul on tensor cores is ~2x faster than float32
+            return (x.half() @ weights.to(dtype=torch.float16, device=x.device)).float()
         return x @ weights.to(dtype=x.dtype, device=x.device)
     return x @ weights.to(device=x.device)
 

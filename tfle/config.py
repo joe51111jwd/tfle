@@ -227,6 +227,15 @@ class TFLEConfig:
     pin_memory: bool = True
     num_workers: int = 4
 
+    # --- 17. Multi-GPU Scaling ---
+    multi_gpu: bool = False
+    gpu_devices: list[int] = field(default_factory=lambda: [0, 1])
+    layer_device_map: str = "auto"  # "auto" | "round_robin" | "memory_balanced" | "manual"
+    manual_device_map: dict = field(default_factory=dict)  # layer_idx -> gpu_id
+    cross_gpu_sync_interval: int = 1
+    data_parallel_task_loss: bool = True
+    prefetch_layer_inputs: bool = True
+
     # --- 14. CDLL Parameters ---
     cdll_alpha: float = 1.0  # entropy penalty weight
     cdll_beta: float = 1.0  # mutual info reward weight
@@ -260,6 +269,48 @@ class TFLEConfig:
         if self.depth_scaled_temperature:
             return base_temp * (self.temperature_depth_scale ** layer_idx)
         return base_temp
+
+
+def build_device_map(config: TFLEConfig) -> dict[int, torch.device]:
+    """Build a layer->device map for multi-GPU training.
+
+    Strategies:
+      auto: balance total params per GPU (greedy assignment)
+      round_robin: alternate layers across GPUs
+      memory_balanced: balance estimated memory (weights + traces + proposals)
+      manual: use config.manual_device_map
+    """
+    layer_sizes = config.layer_sizes
+    n_layers = len(layer_sizes) - 1
+    devices = [torch.device(f"cuda:{g}") for g in config.gpu_devices]
+    n_gpus = len(devices)
+
+    if config.layer_device_map == "manual":
+        return {i: torch.device(f"cuda:{config.manual_device_map.get(i, 0)}") for i in range(n_layers)}
+
+    if config.layer_device_map == "round_robin":
+        return {i: devices[i % n_gpus] for i in range(n_layers)}
+
+    # "auto" or "memory_balanced": greedy assignment by params/memory
+    layer_costs = []
+    for i in range(n_layers):
+        in_f, out_f = layer_sizes[i], layer_sizes[i + 1]
+        if config.layer_device_map == "memory_balanced":
+            # weights (int8) + traces (fp16 * 2) + K proposals (int8)
+            cost = in_f * out_f * (1 + 4 + config.num_parallel_proposals)
+        else:
+            cost = in_f * out_f  # just param count
+        layer_costs.append(cost)
+
+    # Greedy: assign each layer to the GPU with lowest total cost so far
+    gpu_totals = [0] * n_gpus
+    device_map = {}
+    for i in range(n_layers):
+        best_gpu = min(range(n_gpus), key=lambda g: gpu_totals[g])
+        device_map[i] = devices[best_gpu]
+        gpu_totals[best_gpu] += layer_costs[i]
+
+    return device_map
 
 
 def resolve_device(config: TFLEConfig) -> torch.device:

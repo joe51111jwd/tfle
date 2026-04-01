@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from .cdll import CDLLFitness
-from .config import FitnessType, TFLEConfig, resolve_device
+from .config import FitnessType, TFLEConfig, build_device_map, resolve_device
 from .corruption import corrupt_data
 from .layers import TFLELayer, generate_k_proposals
 from .local_heads import LocalClassifierHead
@@ -75,56 +75,104 @@ class TFLEModel:
 
     def __init__(self, config: TFLEConfig, device: str | None = None):
         self.config = config
-        if device is not None:
-            self.device = torch.device(device)
+
+        # Multi-GPU setup
+        if config.multi_gpu and torch.cuda.is_available() and torch.cuda.device_count() >= 2:
+            self.device_map = build_device_map(config)
+            self.multi_gpu = True
+            self.device = torch.device(f"cuda:{config.gpu_devices[0]}")
         else:
-            self.device = resolve_device(config)
+            self.device_map = None
+            self.multi_gpu = False
+            if device is not None:
+                self.device = torch.device(device)
+            else:
+                self.device = resolve_device(config)
+
+        def _layer_device(i: int) -> torch.device:
+            return self.device_map[i] if self.multi_gpu else self.device
+
         self.layers: list[TFLELayer] = []
         for i, (in_f, out_f) in enumerate(
             zip(config.layer_sizes[:-1], config.layer_sizes[1:])
         ):
             self.layers.append(
-                TFLELayer(in_f, out_f, config, layer_idx=i, device=self.device)
+                TFLELayer(in_f, out_f, config, layer_idx=i, device=_layer_device(i))
             )
 
-        # CDLL fitness evaluators (one per layer)
+        # CDLL fitness evaluators (one per layer, on layer's device)
         self.cdll_fitness: list[CDLLFitness] = []
         if config.fitness_type in (FitnessType.CDLL, FitnessType.HYBRID_LOCAL):
             for i, (in_f, out_f) in enumerate(
                 zip(config.layer_sizes[:-1], config.layer_sizes[1:])
             ):
                 self.cdll_fitness.append(
-                    CDLLFitness(in_f, out_f, i, config, self.device)
+                    CDLLFitness(in_f, out_f, i, config, _layer_device(i))
                 )
 
-        # Local classifier heads (one per layer)
+        # Local classifier heads (one per layer, on layer's device)
         self.local_heads: list[LocalClassifierHead] = []
         if config.fitness_type in (FitnessType.MONO_FORWARD, FitnessType.HYBRID_LOCAL):
-            num_classes = config.layer_sizes[-1]  # output dim = num classes
-            for _, out_f in zip(config.layer_sizes[:-1], config.layer_sizes[1:]):
+            num_classes = config.layer_sizes[-1]
+            for i, (_, out_f) in enumerate(
+                zip(config.layer_sizes[:-1], config.layer_sizes[1:])
+            ):
                 self.local_heads.append(
-                    LocalClassifierHead(out_f, num_classes, config, self.device)
+                    LocalClassifierHead(out_f, num_classes, config, _layer_device(i))
                 )
 
-    def to(self, device: str | torch.device):
-        """Move all weights and traces to device (cuda/mps/cpu)."""
-        self.device = torch.device(device) if isinstance(device, str) else device
-        for layer in self.layers:
-            layer.weights = layer.weights.to(self.device)
-            if self.config.separate_pos_neg_traces:
-                layer.success_traces = layer.success_traces.to(self.device)
-                layer.error_traces = layer.error_traces.to(self.device)
-            else:
-                layer.traces = layer.traces.to(self.device)
+    def to(self, device):
+        """Move all weights and traces to device(s).
+
+        Args:
+            device: str, torch.device, or dict[int, torch.device] for multi-GPU.
+        """
+        if isinstance(device, dict):
+            # Multi-GPU: per-layer device map
+            self.device_map = device
+            self.multi_gpu = True
+            self.device = next(iter(device.values()))
+            for i, layer in enumerate(self.layers):
+                dev = device.get(i, self.device)
+                layer.weights = layer.weights.to(dev)
+                layer.device = dev
+                if self.config.separate_pos_neg_traces:
+                    layer.success_traces = layer.success_traces.to(dev)
+                    layer.error_traces = layer.error_traces.to(dev)
+                else:
+                    layer.traces = layer.traces.to(dev)
+                if i < len(self.cdll_fitness) and self.cdll_fitness[i].decoder is not None:
+                    self.cdll_fitness[i].decoder = self.cdll_fitness[i].decoder.to(dev)
+                    self.cdll_fitness[i].device = dev
+                if i < len(self.local_heads):
+                    self.local_heads[i].classifier = self.local_heads[i].classifier.to(dev)
+                    self.local_heads[i].device = dev
+        else:
+            # Single device
+            self.device = torch.device(device) if isinstance(device, str) else device
+            self.multi_gpu = False
+            self.device_map = None
+            for layer in self.layers:
+                layer.weights = layer.weights.to(self.device)
+                layer.device = self.device
+                if self.config.separate_pos_neg_traces:
+                    layer.success_traces = layer.success_traces.to(self.device)
+                    layer.error_traces = layer.error_traces.to(self.device)
+                else:
+                    layer.traces = layer.traces.to(self.device)
         return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Full forward pass through all layers."""
+        """Full forward pass through all layers (handles cross-device transfers)."""
         x = x.to(self.device)
         for i, layer in enumerate(self.layers):
+            if self.multi_gpu:
+                x = x.to(layer.device)
             x = layer.forward(x)
             if i < len(self.layers) - 1:
                 x = F.relu(x)
+        if self.multi_gpu:
+            x = x.to(self.device)
         return x
 
     def predict(self, x: torch.Tensor) -> torch.Tensor:
@@ -252,16 +300,108 @@ class TFLEModel:
         return all_metrics
 
     def _compute_layer_inputs(self, x: torch.Tensor) -> list[torch.Tensor]:
-        """Forward through all layers, caching each layer's input."""
-        inputs = [x]
-        h = x
+        """Forward through all layers, caching each layer's input on correct device."""
+        if self.multi_gpu:
+            inputs = [x.to(self.layers[0].device)]
+        else:
+            inputs = [x]
+        h = inputs[0]
         with torch.no_grad():
             for i, layer in enumerate(self.layers):
+                if self.multi_gpu:
+                    h = h.to(layer.device)
                 h = layer.forward(h)
                 if i < len(self.layers) - 1:
                     h = F.relu(h)
-                inputs.append(h)
-        return inputs  # len = num_layers + 1 (last is final output)
+                # Store on the NEXT layer's device (that's who needs it)
+                if self.multi_gpu and i + 1 < len(self.layers):
+                    inputs.append(h.to(self.layers[i + 1].device))
+                else:
+                    inputs.append(h)
+        return inputs
+
+    def _train_single_layer_local(
+        self,
+        layer_idx: int,
+        layer: TFLELayer,
+        layer_in: torch.Tensor,
+        labels: torch.Tensor,
+        temperature: float,
+        mode: str,
+        K: int,
+    ) -> dict:
+        """Train one layer with local fitness. Self-contained, no cross-layer deps."""
+        layer.step_count += 1
+
+        # Decay cooldowns
+        expired = [k for k, v in layer.cooldown_map.items() if v <= 0]
+        for k in expired:
+            del layer.cooldown_map[k]
+        for k in layer.cooldown_map:
+            layer.cooldown_map[k] -= 1
+
+        # Current output
+        with torch.no_grad():
+            current_out = layer.forward(layer_in)
+            if layer_idx < len(self.layers) - 1:
+                current_out_act = F.relu(current_out)
+            else:
+                current_out_act = current_out
+
+        fitness_before = self._local_fitness(layer_idx, layer_in, current_out_act, labels, mode)
+
+        # Select candidates and generate proposals
+        combined_traces = layer._get_combined_traces()
+        candidates = layer._select_candidates(combined_traces)
+
+        if K > 1:
+            proposals = generate_k_proposals(layer.weights, candidates, K, layer.device)
+        else:
+            proposals = layer._propose_flips(candidates).unsqueeze(0)
+
+        # Evaluate each proposal with local fitness
+        best_fitness = fitness_before
+        best_k = -1
+        for k in range(proposals.shape[0]):
+            with torch.no_grad():
+                w_float = proposals[k].float().to(layer.device)
+                out_k = layer_in @ w_float
+                if layer_idx < len(self.layers) - 1:
+                    out_k = F.relu(out_k)
+            f_k = self._local_fitness(layer_idx, layer_in, out_k, labels, mode)
+            if f_k > best_fitness:
+                best_fitness = f_k
+                best_k = k
+
+        delta = best_fitness - fitness_before
+
+        # Accept/reject
+        layer_temp = self.config.get_temperature_for_layer(temperature, layer_idx)
+        accepted = layer._accept_or_reject(delta, layer_temp)
+
+        if accepted and best_k >= 0:
+            layer.weights = proposals[best_k].to(torch.int8)
+
+        # Update local classifier head
+        if mode in ("mono_forward", "hybrid_local") and layer_idx < len(self.local_heads):
+            self.local_heads[layer_idx].update(current_out_act, labels)
+
+        # Update traces
+        output = layer.forward(layer_in)
+        error_signal = delta <= 0
+        layer._update_traces(layer_in, output, error_signal)
+
+        layer.fitness_history.append(best_fitness if accepted else fitness_before)
+        layer.acceptance_history.append(accepted)
+
+        return {
+            "accepted": accepted,
+            "fitness_before": fitness_before,
+            "fitness_after": best_fitness if accepted else fitness_before,
+            "delta": delta,
+            "n_candidates": len(candidates),
+            "temperature": layer_temp,
+        }
 
     def _train_step_local(
         self,
@@ -273,97 +413,54 @@ class TFLEModel:
         """Train with local fitness: CDLL, Mono-Forward, or Hybrid.
 
         Local fitness means each layer's fitness depends only on its own
-        input and output — no full-model forward pass needed. Layers
-        could theoretically train in parallel (future optimization).
-
-        Args:
-            mode: "cdll", "mono_forward", or "hybrid_local"
+        input and output. With multi-GPU, layers on different GPUs train
+        in parallel via CUDA streams.
         """
         K = max(1, self.config.num_parallel_proposals)
-        all_metrics = []
 
-        # Cache layer inputs (refreshed each step)
+        # Cache layer inputs (sequential — each depends on previous)
         layer_inputs = self._compute_layer_inputs(x)
 
-        for layer_idx, layer in enumerate(self.layers):
-            layer_in = layer_inputs[layer_idx]
-            layer.step_count += 1
+        # Multi-GPU: layer-parallel via CUDA streams
+        if self.multi_gpu:
+            all_metrics: list[dict | None] = [None] * len(self.layers)
 
-            # Decay cooldowns
-            expired = [k for k, v in layer.cooldown_map.items() if v <= 0]
-            for k in expired:
-                del layer.cooldown_map[k]
-            for k in layer.cooldown_map:
-                layer.cooldown_map[k] -= 1
+            # Cache labels on each device
+            labels_per_device: dict[torch.device, torch.Tensor] = {}
+            for dev in set(self.device_map.values()):
+                labels_per_device[dev] = labels.to(dev)
 
-            # Current output
-            with torch.no_grad():
-                current_out = layer.forward(layer_in)
-                if layer_idx < len(self.layers) - 1:
-                    current_out_act = F.relu(current_out)
-                else:
-                    current_out_act = current_out
+            # Create one stream per device
+            streams: dict[torch.device, torch.cuda.Stream] = {}
+            for dev in set(self.device_map.values()):
+                streams[dev] = torch.cuda.Stream(device=dev)
 
-            # Current fitness
-            fitness_before = self._local_fitness(
-                layer_idx, layer_in, current_out_act, labels, mode
-            )
+            # Launch all layers in parallel
+            for layer_idx, layer in enumerate(self.layers):
+                dev = self.device_map[layer_idx]
+                stream = streams[dev]
+                with torch.cuda.stream(stream):
+                    metrics = self._train_single_layer_local(
+                        layer_idx, layer, layer_inputs[layer_idx],
+                        labels_per_device[dev], temperature, mode, K,
+                    )
+                    all_metrics[layer_idx] = metrics
 
-            # Select candidates and generate proposals
-            combined_traces = layer._get_combined_traces()
-            candidates = layer._select_candidates(combined_traces)
+            # Sync all streams
+            for stream in streams.values():
+                stream.synchronize()
 
-            if K > 1:
-                proposals = generate_k_proposals(layer.weights, candidates, K, self.device)
-            else:
-                proposals = layer._propose_flips(candidates).unsqueeze(0)
-
-            # Evaluate each proposal with local fitness
-            best_fitness = fitness_before
-            best_k = -1
-            for k in range(proposals.shape[0]):
-                with torch.no_grad():
-                    w_float = proposals[k].float().to(self.device)
-                    out_k = layer_in @ w_float
-                    if layer_idx < len(self.layers) - 1:
-                        out_k = F.relu(out_k)
-
-                f_k = self._local_fitness(layer_idx, layer_in, out_k, labels, mode)
-                if f_k > best_fitness:
-                    best_fitness = f_k
-                    best_k = k
-
-            delta = best_fitness - fitness_before
-
-            # Accept/reject
-            layer_temp = self.config.get_temperature_for_layer(temperature, layer_idx)
-            accepted = layer._accept_or_reject(delta, layer_temp)
-
-            if accepted and best_k >= 0:
-                layer.weights = proposals[best_k].to(torch.int8)
-
-            # Update local classifier head if using mono-forward or hybrid
-            if mode in ("mono_forward", "hybrid_local") and self.local_heads:
-                self.local_heads[layer_idx].update(current_out_act, labels)
-
-            # Update traces
-            output = layer.forward(layer_in)
-            error_signal = delta <= 0
-            layer._update_traces(layer_in, output, error_signal)
-
-            layer.fitness_history.append(best_fitness if accepted else fitness_before)
-            layer.acceptance_history.append(accepted)
-
-            all_metrics.append({
-                "accepted": accepted,
-                "fitness_before": fitness_before,
-                "fitness_after": best_fitness if accepted else fitness_before,
-                "delta": delta,
-                "n_candidates": len(candidates),
-                "temperature": layer_temp,
-            })
-
-        return all_metrics
+            return all_metrics
+        else:
+            # Single GPU: sequential
+            all_metrics_seq = []
+            for layer_idx, layer in enumerate(self.layers):
+                metrics = self._train_single_layer_local(
+                    layer_idx, layer, layer_inputs[layer_idx],
+                    labels, temperature, mode, K,
+                )
+                all_metrics_seq.append(metrics)
+            return all_metrics_seq
 
     def _local_fitness(
         self,
@@ -473,13 +570,17 @@ class TFLEModel:
         }
 
     def save_checkpoint(self, path: str):
+        """Save checkpoint. Always saves weights to CPU for portability."""
         state = {
             "config": self.config,
-            "weights": [layer.weights.clone() for layer in self.layers],
+            "weights": [layer.weights.cpu().clone() for layer in self.layers],
+            "device_map": {k: str(v) for k, v in self.device_map.items()} if self.multi_gpu else None,
         }
         torch.save(state, path)
 
     def load_checkpoint(self, path: str):
-        state = torch.load(path, weights_only=False)
-        for layer, weights in zip(self.layers, state["weights"]):
-            layer.weights = weights
+        """Load checkpoint. Weights are placed on the correct device."""
+        state = torch.load(path, weights_only=False, map_location="cpu")
+        for i, (layer, weights) in enumerate(zip(self.layers, state["weights"])):
+            dev = self.device_map[i] if self.multi_gpu else self.device
+            layer.weights = weights.to(dev)

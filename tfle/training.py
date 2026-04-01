@@ -62,6 +62,18 @@ class TFLETrainer:
         self.config = config
         self.train_loader = train_loader
         self.val_loader = val_loader
+
+        # Validate multi-GPU setup
+        if config.multi_gpu:
+            n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+            if n_gpus < 2:
+                import warnings
+                warnings.warn(
+                    f"multi_gpu=True but only {n_gpus} GPU(s) found. "
+                    "Falling back to single GPU.",
+                    stacklevel=2,
+                )
+                model.multi_gpu = False
         self.scheduler = TemperatureScheduler(config)
         self.monitor = ConvergenceMonitor(config, len(model.layers))
         self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else None
