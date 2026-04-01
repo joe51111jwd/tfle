@@ -174,18 +174,18 @@ def main():
         eval_interval=500,
         fitness_eval_batch_size=128,
         fitness_type=FitnessType.TASK_LOSS,
-        initial_temperature=0.08,
+        initial_temperature=0.20,
         min_temperature=0.001,
         cooling_schedule=CoolingSchedule.COSINE,
         reheat_on_plateau=True,
-        plateau_window=2000,
-        reheat_factor=2.0,
+        plateau_window=3000,
+        reheat_factor=2.5,
         flip_rate=0.02,
         trace_decay=0.95,
         exploration_rate=0.005,
         early_stopping_patience=100_000,
     )
-    r1 = run_experiment("mnist_100k_cosine_008", config1, mnist_train, mnist_val, save_checkpoint=True)
+    r1 = run_experiment("mnist_100k_cosine_020", config1, mnist_train, mnist_val, save_checkpoint=True)
     all_results["exp1_cosine_008"] = r1
     save_results(all_results, "results_running.json")
 
@@ -198,7 +198,7 @@ def main():
         eval_interval=500,
         fitness_eval_batch_size=128,
         fitness_type=FitnessType.TASK_LOSS,
-        initial_temperature=0.02,
+        initial_temperature=0.10,
         min_temperature=0.0005,
         cooling_schedule=CoolingSchedule.COSINE,
         reheat_on_plateau=True,

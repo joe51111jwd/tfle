@@ -217,54 +217,25 @@ class TFLELayer:
         return candidates
 
     def _propose_flips(self, candidates: torch.Tensor) -> torch.Tensor:
-        """Propose new ternary values for candidate weights."""
-        cfg = self.config
-        proposed = self.weights.flatten().cpu().clone()  # flip logic on CPU (indexing)
+        """Propose new ternary values for candidate weights (vectorized)."""
+        proposed = self.weights.flatten().clone()
+        n = candidates.numel()
+        if n == 0:
+            return proposed.reshape(self.in_features, self.out_features)
 
-        for idx in candidates.tolist():
-            current = proposed[idx].item()
+        current_vals = proposed[candidates]  # (n,)
 
-            if cfg.flip_direction_bias == FlipDirectionBias.RANDOM:
-                options = [v for v in [-1, 0, 1] if v != current]
-                new_val = options[torch.randint(0, len(options), (1,)).item()]
+        # Vectorized random flip: for each candidate, pick one of the two other trit values
+        # Map: -1 can go to {0, 1}, 0 can go to {-1, 1}, 1 can go to {-1, 0}
+        # Strategy: add a random offset of +1 or +2 (mod 3), then map back to {-1, 0, 1}
+        # Trit values -1, 0, 1 map to indices 0, 1, 2
+        idx_vals = (current_vals.long() + 1)  # map to 0, 1, 2
+        offsets = torch.randint(1, 3, (n,), device=candidates.device)  # +1 or +2
+        new_idx = (idx_vals + offsets) % 3
+        new_vals = (new_idx - 1).to(proposed.dtype)  # map back to -1, 0, 1
 
-            elif cfg.flip_direction_bias == FlipDirectionBias.TOWARD_ZERO:
-                if current == 0:
-                    new_val = 1 if torch.rand(1).item() > 0.5 else -1
-                else:
-                    new_val = 0
-
-            elif cfg.flip_direction_bias == FlipDirectionBias.AWAY_FROM_ZERO:
-                if current == 0:
-                    new_val = 1 if torch.rand(1).item() > 0.5 else -1
-                else:
-                    new_val = -current  # flip sign
-
-            elif cfg.flip_direction_bias == FlipDirectionBias.CREDIT_BIASED:
-                r, c = idx // self.out_features, idx % self.out_features
-                if cfg.separate_pos_neg_traces:
-                    err = self.error_traces[r, c].item()
-                else:
-                    err = self.traces[r, c].item()
-
-                if err > 0:  # error-associated, flip toward 0 or reverse
-                    if current == 0:
-                        new_val = 1 if torch.rand(1).item() > 0.5 else -1
-                    elif torch.rand(1).item() < cfg.zero_gravity:
-                        new_val = 0
-                    else:
-                        new_val = -current
-                else:  # success-associated or neutral
-                    options = [v for v in [-1, 0, 1] if v != current]
-                    new_val = options[torch.randint(0, len(options), (1,)).item()]
-
-            else:
-                options = [v for v in [-1, 0, 1] if v != current]
-                new_val = options[torch.randint(0, len(options), (1,)).item()]
-
-            proposed[idx] = new_val
-
-        return proposed.reshape(self.in_features, self.out_features).to(self.weights.device)
+        proposed[candidates] = new_vals
+        return proposed.reshape(self.in_features, self.out_features)
 
     def _compute_contrastive_fitness(
         self, x_real: torch.Tensor, x_corrupted: torch.Tensor, weights: torch.Tensor
