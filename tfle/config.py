@@ -191,7 +191,6 @@ class TFLEConfig:
     checkpoint_interval: int = 5000
     max_memory_mb: Optional[int] = None
     gradient_free: bool = True
-    n_proposals: int = 0  # 0 = single proposal (classic), >1 = batched GPU evaluation
 
     # --- 10. Exploration and Diversity ---
     exploration_rate: float = 0.003

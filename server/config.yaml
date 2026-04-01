@@ -1,33 +1,29 @@
 # TFLE Server Training Config
-# Edit this to control what runs on your GPU(s)
+# One proposal per step (true TFLE algorithm — traces learn from each decision)
+# Edit GPUs, architecture, temperature, etc. to control experiments
 
 server:
-  gpus: [0, 1]              # Which GPUs to use (one experiment stream per GPU)
+  gpus: [0, 1]
   results_dir: "/workspace/tfle/results"
   checkpoint_dir: "/workspace/tfle/checkpoints"
 
-# Each GPU runs its experiment list sequentially
-# Both GPUs run in parallel
-
 gpu_0:
-  - name: "mnist_100k_batched"
+  - name: "mnist_100k_t020"
     dataset: "mnist"
-    architecture: [784, 1024, 512, 256, 10]   # ~1.4M params — big enough for GPU
+    architecture: [784, 512, 256, 10]
     steps: 100000
     batch_size: 512
-    n_proposals: 32          # Evaluate 32 flip proposals at once on GPU
     temperature: 0.20
     min_temperature: 0.001
     cooling: "cosine"
     flip_rate: 0.02
     save_checkpoint: true
 
-  - name: "mnist_500k_batched"
+  - name: "mnist_500k_long"
     dataset: "mnist"
-    architecture: [784, 1024, 512, 256, 10]
+    architecture: [784, 512, 256, 10]
     steps: 500000
     batch_size: 512
-    n_proposals: 32
     temperature: 0.20
     min_temperature: 0.001
     cooling: "cosine"
@@ -36,10 +32,9 @@ gpu_0:
 
   - name: "mnist_500k_low_flip"
     dataset: "mnist"
-    architecture: [784, 1024, 512, 256, 10]
+    architecture: [784, 512, 256, 10]
     steps: 500000
     batch_size: 512
-    n_proposals: 32
     temperature: 0.15
     min_temperature: 0.0005
     cooling: "cosine"
@@ -48,30 +43,28 @@ gpu_0:
 
   - name: "ste_baseline_mnist"
     dataset: "mnist"
-    architecture: [784, 1024, 512, 256, 10]
+    architecture: [784, 512, 256, 10]
     type: "ste_baseline"
     steps: 100000
     batch_size: 512
 
 gpu_1:
-  - name: "mnist_100k_temp010"
+  - name: "mnist_100k_t010"
     dataset: "mnist"
-    architecture: [784, 1024, 512, 256, 10]
+    architecture: [784, 512, 256, 10]
     steps: 100000
     batch_size: 512
-    n_proposals: 32
     temperature: 0.10
     min_temperature: 0.0005
     cooling: "cosine"
     flip_rate: 0.02
     save_checkpoint: true
 
-  - name: "cifar10_100k_batched"
+  - name: "cifar10_100k"
     dataset: "cifar10"
-    architecture: [3072, 1024, 512, 256, 10]   # ~4.4M params
+    architecture: [3072, 512, 256, 10]
     steps: 100000
     batch_size: 256
-    n_proposals: 16           # Fewer proposals (bigger model)
     temperature: 0.20
     min_temperature: 0.001
     cooling: "cosine"
@@ -80,10 +73,9 @@ gpu_1:
 
   - name: "cifar10_500k_long"
     dataset: "cifar10"
-    architecture: [3072, 1024, 512, 256, 10]
+    architecture: [3072, 512, 256, 10]
     steps: 500000
     batch_size: 256
-    n_proposals: 16
     temperature: 0.20
     min_temperature: 0.001
     cooling: "cosine"
@@ -92,7 +84,7 @@ gpu_1:
 
   - name: "ste_baseline_cifar10"
     dataset: "cifar10"
-    architecture: [3072, 1024, 512, 256, 10]
+    architecture: [3072, 512, 256, 10]
     type: "ste_baseline"
     steps: 100000
     batch_size: 256
