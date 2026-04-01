@@ -46,6 +46,13 @@ class TFLEModel:
 
         Returns list of per-layer metrics.
         """
+        from .config import FitnessType
+
+        use_task_loss = (
+            self.config.fitness_type == FitnessType.TASK_LOSS
+            and labels is not None
+        )
+
         x_corrupted = corrupt_data(x, self.config, labels)
 
         all_metrics = []
@@ -53,7 +60,20 @@ class TFLEModel:
         current_corrupted = x_corrupted
 
         for layer in self.layers:
-            metrics = layer.train_step(current_real, current_corrupted, temperature)
+            # Build task loss closure if using task-aware fitness
+            task_loss_fn = None
+            if use_task_loss:
+                # Capture x and labels for the closure
+                _x, _labels = x, labels
+                def task_loss_fn(_x=_x, _labels=_labels):
+                    with torch.no_grad():
+                        logits = self.forward(_x)
+                        return F.cross_entropy(logits, _labels).item()
+
+            metrics = layer.train_step(
+                current_real, current_corrupted, temperature,
+                task_loss_fn=task_loss_fn,
+            )
             all_metrics.append(metrics)
 
             # Forward for next layer input (using current weights, post-update)

@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from .config import (
     AcceptanceFunction,
     CreditNormalization,
+    FitnessType,
     FlipDirectionBias,
     GoodnessMetric,
     InitMethod,
@@ -347,8 +348,14 @@ class TFLELayer:
         x_corrupted: torch.Tensor,
         temperature: float,
         is_error: Optional[bool] = None,
+        task_loss_fn=None,
     ) -> dict:
         """Execute one TFLE training step for this layer.
+
+        Args:
+            task_loss_fn: Optional callable() -> float. If provided and config.fitness_type
+                is TASK_LOSS, this function evaluates the full model's loss with current
+                weights. The layer swaps its weights before/after calling it.
 
         Returns dict with metrics: accepted, fitness_before, fitness_after, delta, n_candidates
         """
@@ -362,7 +369,15 @@ class TFLELayer:
             self.cooldown_map[k] -= 1
 
         # 1. Current fitness
-        fitness_before = self._compute_contrastive_fitness(x_real, x_corrupted, self.weights)
+        use_task_loss = (
+            self.config.fitness_type == FitnessType.TASK_LOSS
+            and task_loss_fn is not None
+        )
+        if use_task_loss:
+            # Fitness = negative loss (higher is better)
+            fitness_before = -task_loss_fn()
+        else:
+            fitness_before = self._compute_contrastive_fitness(x_real, x_corrupted, self.weights)
 
         # 2. Select candidates
         combined_traces = self._get_combined_traces()
@@ -371,8 +386,14 @@ class TFLELayer:
         # 3. Propose flips
         proposed_weights = self._propose_flips(candidates)
 
-        # 4. Evaluate
-        fitness_after = self._compute_contrastive_fitness(x_real, x_corrupted, proposed_weights)
+        # 4. Evaluate — swap weights temporarily for task_loss evaluation
+        if use_task_loss:
+            old_weights = self.weights
+            self.weights = proposed_weights.to(torch.int8)
+            fitness_after = -task_loss_fn()
+            self.weights = old_weights  # restore for accept/reject decision
+        else:
+            fitness_after = self._compute_contrastive_fitness(x_real, x_corrupted, proposed_weights)
         delta = fitness_after - fitness_before
 
         # 5. Accept or reject

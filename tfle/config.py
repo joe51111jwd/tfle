@@ -74,6 +74,7 @@ class FitnessType(Enum):
     PREDICTIVE = "predictive"
     COMPRESSION = "compression"
     HYBRID = "hybrid"
+    TASK_LOSS = "task_loss"  # Use model-level cross-entropy as fitness signal
 
 
 class CorruptionMethod(Enum):
