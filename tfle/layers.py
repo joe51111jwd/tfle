@@ -178,20 +178,20 @@ class TFLELayer:
                 valid_scores[~valid_mask] = float("-inf")
                 _, guided_idx = torch.topk(valid_scores, min(n_guided, valid_mask.sum().item()))
             else:
-                guided_idx = torch.tensor([], dtype=torch.long)
+                guided_idx = torch.tensor([], dtype=torch.long, device=flat_traces.device)
 
-            explore_idx = torch.randint(0, n_weights, (n_explore,))
+            explore_idx = torch.randint(0, n_weights, (n_explore,), device=flat_traces.device)
             candidates = torch.cat([guided_idx, explore_idx]).unique()
 
         elif cfg.selection_method == SelectionMethod.UNIFORM_RANDOM:
-            candidates = torch.randperm(n_weights)[:n_candidates]
+            candidates = torch.randperm(n_weights, device=flat_traces.device)[:n_candidates]
 
         elif cfg.selection_method == SelectionMethod.ANTI_CORRELATED:
             scores = flat_traces
             _, candidates = torch.topk(scores, n_candidates)
 
         else:
-            candidates = torch.randperm(n_weights)[:n_candidates]
+            candidates = torch.randperm(n_weights, device=flat_traces.device)[:n_candidates]
 
         # Filter out weights in cooldown
         if cfg.flip_revert_on_reject.value == "cooldown":
