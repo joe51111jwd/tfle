@@ -71,6 +71,12 @@ class TFLETrainer:
                 if batch_x.dim() > 2:
                     batch_x = batch_x.view(batch_x.size(0), -1)
 
+                # Move to model device (GPU if available)
+                device = getattr(self.model, 'device', None)
+                if device is not None:
+                    batch_x = batch_x.to(device)
+                    batch_y = batch_y.to(device)
+
                 temperature = self.scheduler.get_temperature()
                 layer_metrics = self.model.train_step(batch_x, temperature, batch_y)
 
@@ -162,6 +168,10 @@ class TFLETrainer:
             for batch_x, batch_y in self.val_loader:
                 if batch_x.dim() > 2:
                     batch_x = batch_x.view(batch_x.size(0), -1)
+                device = getattr(self.model, 'device', None)
+                if device is not None:
+                    batch_x = batch_x.to(device)
+                    batch_y = batch_y.to(device)
                 eval_result = self.model.evaluate(batch_x, batch_y)
                 all_correct += eval_result["accuracy"] * batch_x.size(0)
                 all_total += batch_x.size(0)

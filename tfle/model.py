@@ -15,13 +15,26 @@ from .layers import TFLELayer
 class TFLEModel:
     """A multi-layer ternary network trained with TFLE."""
 
-    def __init__(self, config: TFLEConfig):
+    def __init__(self, config: TFLEConfig, device: str = "cpu"):
         self.config = config
+        self.device = torch.device(device)
         self.layers: list[TFLELayer] = []
         for i, (in_f, out_f) in enumerate(
             zip(config.layer_sizes[:-1], config.layer_sizes[1:])
         ):
             self.layers.append(TFLELayer(in_f, out_f, config, layer_idx=i))
+
+    def to(self, device: str):
+        """Move all weights and traces to device (cuda/cpu)."""
+        self.device = torch.device(device)
+        for layer in self.layers:
+            layer.weights = layer.weights.to(self.device)
+            if self.config.separate_pos_neg_traces:
+                layer.success_traces = layer.success_traces.to(self.device)
+                layer.error_traces = layer.error_traces.to(self.device)
+            else:
+                layer.traces = layer.traces.to(self.device)
+        return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Full forward pass through all layers."""

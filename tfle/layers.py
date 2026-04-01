@@ -61,8 +61,9 @@ def ternary_matmul(x: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     For ternary weights, multiply becomes add/subtract/skip:
     w=+1 -> add input, w=-1 -> subtract input, w=0 -> skip
     """
-    w_float = weights.float()
-    return x @ w_float
+    if weights.dtype == torch.int8:
+        return x @ weights.to(dtype=x.dtype, device=x.device)
+    return x @ weights.to(device=x.device)
 
 
 def compute_goodness(activations: torch.Tensor, metric: GoodnessMetric) -> torch.Tensor:
@@ -218,7 +219,7 @@ class TFLELayer:
     def _propose_flips(self, candidates: torch.Tensor) -> torch.Tensor:
         """Propose new ternary values for candidate weights."""
         cfg = self.config
-        proposed = self.weights.flatten().clone()
+        proposed = self.weights.flatten().cpu().clone()  # flip logic on CPU (indexing)
 
         for idx in candidates.tolist():
             current = proposed[idx].item()
@@ -263,14 +264,15 @@ class TFLELayer:
 
             proposed[idx] = new_val
 
-        return proposed.reshape(self.in_features, self.out_features)
+        return proposed.reshape(self.in_features, self.out_features).to(self.weights.device)
 
     def _compute_contrastive_fitness(
         self, x_real: torch.Tensor, x_corrupted: torch.Tensor, weights: torch.Tensor
     ) -> float:
         """Compute contrastive fitness for given weights."""
-        out_real = x_real @ weights.float()
-        out_fake = x_corrupted @ weights.float()
+        w = weights.to(dtype=x_real.dtype, device=x_real.device)
+        out_real = x_real @ w
+        out_fake = x_corrupted @ w
         goodness_real = compute_goodness(out_real, self.config.goodness_metric).mean()
         goodness_fake = compute_goodness(out_fake, self.config.goodness_metric).mean()
         return (goodness_real - goodness_fake).item()
