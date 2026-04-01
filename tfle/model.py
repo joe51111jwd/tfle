@@ -131,20 +131,13 @@ class TFLEModel:
                 proposals.append(proposed)
                 candidate_sets.append(candidates)
 
-            # Evaluate all N proposals by swapping weights and batching
-            # Stack input: repeat x for each proposal
-            # x shape: (batch, features) -> (n_proposals * batch, features)
-            batch_size = x.shape[0]
-            x_repeated = x.repeat(n_proposals, 1)  # (N*B, features)
-            labels_repeated = labels.repeat(n_proposals)  # (N*B,)
-
-            # Forward each proposal: swap layer weights, forward, collect
+            # Evaluate all N proposals: swap this layer's weights, full model forward
             losses = []
             old_weights = layer.weights.clone()
             for p in proposals:
                 layer.weights = p.to(torch.int8)
                 with torch.no_grad():
-                    logits_p = self.forward(x)
+                    logits_p = self.forward(x)  # full model forward with swapped layer
                     loss_p = F.cross_entropy(logits_p, labels).item()
                 losses.append(loss_p)
             layer.weights = old_weights  # restore
@@ -162,10 +155,14 @@ class TFLEModel:
             if accepted:
                 layer.weights = proposals[best_idx].to(torch.int8)
 
-            # Update traces based on best proposal's candidates
-            output = layer.forward(x)
+            # Update traces — compute this layer's actual input/output
+            with torch.no_grad():
+                layer_input = x
+                for prev_layer in self.layers[:layer_idx]:
+                    layer_input = F.relu(prev_layer.forward(layer_input))
+                output = layer.forward(layer_input)
             error_signal = delta <= 0
-            layer._update_traces(x, output, error_signal)
+            layer._update_traces(layer_input, output, error_signal)
 
             # Track
             fitness = -best_loss if accepted else -loss_before
