@@ -78,7 +78,15 @@ class TFLETrainer:
                     batch_y = batch_y.to(device)
 
                 temperature = self.scheduler.get_temperature()
-                layer_metrics = self.model.train_step(batch_x, temperature, batch_y)
+
+                # Use batched mode if available and configured
+                n_proposals = getattr(self.config, 'n_proposals', 0)
+                if n_proposals > 1 and hasattr(self.model, 'train_step_batched'):
+                    layer_metrics = self.model.train_step_batched(
+                        batch_x, temperature, batch_y, n_proposals=n_proposals
+                    )
+                else:
+                    layer_metrics = self.model.train_step(batch_x, temperature, batch_y)
 
                 # Record metrics
                 for i, lm in enumerate(layer_metrics):

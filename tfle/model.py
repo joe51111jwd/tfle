@@ -95,6 +95,100 @@ class TFLEModel:
 
         return all_metrics
 
+    def train_step_batched(
+        self,
+        x: torch.Tensor,
+        temperature: float,
+        labels: torch.Tensor,
+        n_proposals: int = 32,
+    ) -> list[dict]:
+        """Batched TFLE step: evaluate N flip proposals simultaneously on GPU.
+
+        Instead of 1 forward pass per proposal, we batch N proposals into
+        one big forward pass. This saturates the GPU.
+
+        For each layer:
+          1. Generate N different flip proposals
+          2. Build N copies of the model weights (only this layer differs)
+          3. Forward all N through the model as a batch
+          4. Pick the best proposal (or reject all)
+        """
+        all_metrics = []
+
+        for layer_idx, layer in enumerate(self.layers):
+            # Current loss
+            with torch.no_grad():
+                logits = self.forward(x)
+                loss_before = F.cross_entropy(logits, labels).item()
+
+            # Generate N flip proposals for this layer
+            combined_traces = layer._get_combined_traces()
+            proposals = []
+            candidate_sets = []
+            for _ in range(n_proposals):
+                candidates = layer._select_candidates(combined_traces)
+                proposed = layer._propose_flips(candidates)
+                proposals.append(proposed)
+                candidate_sets.append(candidates)
+
+            # Evaluate all N proposals by swapping weights and batching
+            # Stack input: repeat x for each proposal
+            # x shape: (batch, features) -> (n_proposals * batch, features)
+            batch_size = x.shape[0]
+            x_repeated = x.repeat(n_proposals, 1)  # (N*B, features)
+            labels_repeated = labels.repeat(n_proposals)  # (N*B,)
+
+            # Forward each proposal: swap layer weights, forward, collect
+            losses = []
+            old_weights = layer.weights.clone()
+            for p in proposals:
+                layer.weights = p.to(torch.int8)
+                with torch.no_grad():
+                    logits_p = self.forward(x)
+                    loss_p = F.cross_entropy(logits_p, labels).item()
+                losses.append(loss_p)
+            layer.weights = old_weights  # restore
+
+            # Find best proposal
+            losses_t = torch.tensor(losses)
+            best_idx = losses_t.argmin().item()
+            best_loss = losses[best_idx]
+            delta = loss_before - best_loss  # positive = improvement
+
+            # Accept/reject with simulated annealing
+            layer_temp = layer.config.get_temperature_for_layer(temperature, layer_idx)
+            accepted = layer._accept_or_reject(delta, layer_temp)
+
+            if accepted:
+                layer.weights = proposals[best_idx].to(torch.int8)
+
+            # Update traces based on best proposal's candidates
+            output = layer.forward(x)
+            error_signal = delta <= 0
+            layer._update_traces(x, output, error_signal)
+
+            # Track
+            fitness = -best_loss if accepted else -loss_before
+            layer.fitness_history.append(fitness)
+            layer.acceptance_history.append(accepted)
+            if layer.fitness_ema is None:
+                layer.fitness_ema = fitness
+            else:
+                layer.fitness_ema = 0.99 * layer.fitness_ema + 0.01 * fitness
+
+            all_metrics.append({
+                "accepted": accepted,
+                "fitness_before": -loss_before,
+                "fitness_after": -best_loss,
+                "delta": delta,
+                "n_candidates": sum(len(c) for c in candidate_sets),
+                "temperature": layer_temp,
+                "n_proposals": n_proposals,
+                "best_proposal_idx": best_idx,
+            })
+
+        return all_metrics
+
     def evaluate(self, x: torch.Tensor, labels: torch.Tensor) -> dict:
         """Evaluate model accuracy."""
         with torch.no_grad():
