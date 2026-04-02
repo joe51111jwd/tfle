@@ -219,15 +219,19 @@ class SearchParallelEngine:
         candidates = layer._select_candidates(combined_traces)
         proposals = generate_k_proposals(layer.weights, candidates, self.K, dev)
 
-        # Evaluate each proposal with CDLL
+        # Batched forward: all K proposals at once via bmm
+        with torch.no_grad():
+            h_exp = layer_in.unsqueeze(0).expand(self.K, -1, -1)  # (K, B, in)
+            w_float = proposals.float().to(dev)                     # (K, in, out)
+            outs_k = torch.bmm(h_exp, w_float)                     # (K, B, out)
+            if layer_idx < len(self.model.layers) - 1:
+                outs_k = F.relu(outs_k)
+
+        # Evaluate CDLL for each proposal
         best_fitness = fitness_before
         best_k = -1
-        for k in range(proposals.shape[0]):
-            with torch.no_grad():
-                out_k = layer_in @ proposals[k].float().to(dev)
-                if layer_idx < len(self.model.layers) - 1:
-                    out_k = F.relu(out_k)
-            f_k = self.cdll[layer_idx].compute(layer_in, out_k)
+        for k in range(self.K):
+            f_k = self.cdll[layer_idx].compute(layer_in, outs_k[k])
             if f_k > best_fitness:
                 best_fitness = f_k
                 best_k = k
@@ -274,15 +278,19 @@ class SearchParallelEngine:
         candidates = layer._select_candidates(combined_traces)
         proposals = generate_k_proposals(layer.weights, candidates, self.K, dev)
 
-        # Evaluate with critic
+        # Batched forward: all K at once
+        with torch.no_grad():
+            h_exp = layer_in.unsqueeze(0).expand(self.K, -1, -1)
+            w_float = proposals.float().to(dev)
+            outs_k = torch.bmm(h_exp, w_float)
+            if layer_idx < len(self.model.layers) - 1:
+                outs_k = F.relu(outs_k)
+
+        # Evaluate critic for each proposal
         best_fitness = fitness_before
         best_k = -1
-        for k in range(proposals.shape[0]):
-            with torch.no_grad():
-                out_k = layer_in @ proposals[k].float().to(dev)
-                if layer_idx < len(self.model.layers) - 1:
-                    out_k = F.relu(out_k)
-            f_k = self.swt.get_critic_fitness(layer_idx, out_k)
+        for k in range(self.K):
+            f_k = self.swt.get_critic_fitness(layer_idx, outs_k[k])
             if f_k > best_fitness:
                 best_fitness = f_k
                 best_k = k

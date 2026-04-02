@@ -65,10 +65,10 @@ class CDLLFitness:
             )
 
     def _compute_entropy(self, activations: torch.Tensor) -> torch.Tensor:
-        """Histogram entropy of activations. Runs on GPU.
+        """Histogram entropy of activations — fully vectorized on GPU.
 
         For batch of activations (B, D), computes per-neuron entropy via
-        binned histogram, averaged across neurons.
+        one-hot binning as a single batched operation. No Python loops.
         """
         act = activations.detach()
         if act.numel() == 0:
@@ -79,22 +79,27 @@ class CDLLFitness:
         if act_max - act_min < 1e-8:
             return torch.tensor(0.0, device=self.device)
 
-        # Normalize to [0, 1] for binning
-        act_norm = (act - act_min) / (act_max - act_min + 1e-8)
+        B, D = act.shape
+        sample_d = min(D, 256)
+        act_sampled = act[:, :sample_d]
+
+        # Normalize to [0, 1] and bin
+        act_norm = (act_sampled - act_min) / (act_max - act_min + 1e-8)
         bin_indices = (act_norm * (self.n_bins - 1)).long().clamp(0, self.n_bins - 1)
 
-        B, D = act.shape
-        total_entropy = torch.tensor(0.0, device=self.device)
+        # One-hot encode bins: (B, sample_d) -> (B, sample_d, n_bins)
+        one_hot = torch.zeros(B, sample_d, self.n_bins, device=self.device)
+        one_hot.scatter_(2, bin_indices.unsqueeze(2), 1.0)
 
-        # Sample neurons if too many (keep it fast)
-        sample_d = min(D, 256)
-        for j in range(sample_d):
-            counts = torch.bincount(bin_indices[:, j], minlength=self.n_bins).float()
-            probs = counts / B
-            probs = probs[probs > 0]
-            total_entropy -= (probs * probs.log()).sum()
+        # Sum over batch to get histograms per neuron: (sample_d, n_bins)
+        counts = one_hot.sum(dim=0)
+        probs = counts / B
 
-        return total_entropy / sample_d
+        # Entropy per neuron: -sum(p * log(p)) for p > 0
+        log_probs = torch.where(probs > 0, probs.log(), torch.zeros_like(probs))
+        entropy_per_neuron = -(probs * log_probs).sum(dim=1)  # (sample_d,)
+
+        return entropy_per_neuron.mean()
 
     def _compute_mutual_info(
         self, layer_input: torch.Tensor, activations: torch.Tensor
