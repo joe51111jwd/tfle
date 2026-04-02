@@ -144,6 +144,53 @@ class CDLLFitness:
 
         return fitness.item()
 
+    def compute_batch(self, layer_input: torch.Tensor, activations_k: torch.Tensor) -> torch.Tensor:
+        """Compute CDLL fitness for K proposals at once. No Python loops.
+
+        Args:
+            layer_input: (B, in_features) — same for all proposals
+            activations_k: (K, B, out_features) — K outputs
+
+        Returns:
+            (K,) fitness values
+        """
+        K, B, D = activations_k.shape
+        act = activations_k.detach()
+        sample_d = min(D, 256)
+
+        # --- Batched entropy ---
+        act_flat = act.reshape(K, -1)
+        a_min = act_flat.min(dim=1).values.view(K, 1, 1)
+        a_max = act_flat.max(dim=1).values.view(K, 1, 1)
+        spread = a_max - a_min + 1e-8
+        zero_mask = (spread.squeeze() < 1e-7)
+
+        act_norm = (act[:, :, :sample_d] - a_min) / spread
+        bin_idx = (act_norm * (self.n_bins - 1)).long().clamp(0, self.n_bins - 1)
+
+        one_hot = torch.zeros(K, B, sample_d, self.n_bins, device=self.device)
+        one_hot.scatter_(3, bin_idx.unsqueeze(3), 1.0)
+        counts = one_hot.sum(dim=1)  # (K, sample_d, n_bins)
+        probs = counts / B
+        log_p = torch.where(probs > 0, probs.log(), torch.zeros_like(probs))
+        entropy_k = -(probs * log_p).sum(dim=2).mean(dim=1)  # (K,)
+        if zero_mask.any():
+            entropy_k = entropy_k.masked_fill(zero_mask, 0.0)
+
+        # --- Batched MI ---
+        x = layer_input.detach()
+        x_c = x - x.mean(dim=0, keepdim=True)
+        x_dim = min(x.shape[1], 256)
+        y_dim = sample_d
+        x_sub = x_c[:, :x_dim]  # (B, x_dim)
+        y_sub = act[:, :, :y_dim]  # (K, B, y_dim)
+        y_c = y_sub - y_sub.mean(dim=1, keepdim=True)
+        x_exp = x_sub.unsqueeze(0).expand(K, -1, -1)
+        cc = torch.bmm(y_c.transpose(1, 2), x_exp) / max(B - 1, 1)  # (K, y_dim, x_dim)
+        mi_k = cc.reshape(K, -1).norm(dim=1) / (x_dim * y_dim) ** 0.5
+
+        return -self.alpha * entropy_k + self.beta * mi_k
+
     def _compute_reconstruction(
         self, layer_input: torch.Tensor, activations: torch.Tensor
     ) -> torch.Tensor:

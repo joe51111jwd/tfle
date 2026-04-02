@@ -219,22 +219,22 @@ class SearchParallelEngine:
         candidates = layer._select_candidates(combined_traces)
         proposals = generate_k_proposals(layer.weights, candidates, self.K, dev)
 
-        # Batched forward: all K proposals at once via bmm
+        # Batched forward + batched CDLL: zero Python loops
         with torch.no_grad():
-            h_exp = layer_in.unsqueeze(0).expand(self.K, -1, -1)  # (K, B, in)
-            w_float = proposals.float().to(dev)                     # (K, in, out)
-            outs_k = torch.bmm(h_exp, w_float)                     # (K, B, out)
+            h_exp = layer_in.unsqueeze(0).expand(self.K, -1, -1)
+            w_float = proposals.float().to(dev)
+            outs_k = torch.bmm(h_exp, w_float)  # (K, B, out)
             if layer_idx < len(self.model.layers) - 1:
                 outs_k = F.relu(outs_k)
 
-        # Evaluate CDLL for each proposal
-        best_fitness = fitness_before
-        best_k = -1
-        for k in range(self.K):
-            f_k = self.cdll[layer_idx].compute(layer_in, outs_k[k])
-            if f_k > best_fitness:
-                best_fitness = f_k
-                best_k = k
+        fitness_k = self.cdll[layer_idx].compute_batch(layer_in, outs_k)  # (K,)
+        best_k = fitness_k.argmax().item()
+        best_fitness = fitness_k[best_k].item()
+
+        # Only accept if better than current
+        if best_fitness <= fitness_before:
+            best_k = -1
+            best_fitness = fitness_before
 
         delta = best_fitness - fitness_before
 
