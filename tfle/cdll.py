@@ -154,7 +154,11 @@ class CDLLFitness:
             recon = self._compute_reconstruction(layer_input, activations)
             fitness = fitness + recon
 
-        return fitness.item()
+        result = fitness.item()
+        # NaN guard: return 0 if computation failed
+        if result != result:  # NaN check
+            return 0.0
+        return result
 
     def compute_batch(self, layer_input: torch.Tensor, activations_k: torch.Tensor) -> torch.Tensor:
         """Compute CDLL fitness for K proposals at once.
@@ -167,6 +171,8 @@ class CDLLFitness:
         results = torch.zeros(K, device=self.device)
         for k in range(K):
             results[k] = self.compute(layer_input, activations_k[k])
+        # Replace any remaining NaN with 0
+        results = torch.nan_to_num(results, nan=0.0)
         return results
 
     def _compute_reconstruction(
