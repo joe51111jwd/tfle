@@ -472,11 +472,11 @@ class TFLEModel:
     ) -> float:
         """Compute local fitness for a layer."""
         if mode == "cdll":
-            return self.cdll_fitness[layer_idx].compute(layer_input, layer_output)
+            return self.cdll_fitness[layer_idx].compute(layer_input, layer_output, labels)
         elif mode == "mono_forward":
             return self.local_heads[layer_idx].compute_fitness(layer_output, labels)
         elif mode == "hybrid_local":
-            cdll_f = self.cdll_fitness[layer_idx].compute(layer_input, layer_output)
+            cdll_f = self.cdll_fitness[layer_idx].compute(layer_input, layer_output, labels)
             mono_f = self.local_heads[layer_idx].compute_fitness(layer_output, labels)
             lam = self.config.local_head_lambda
             return mono_f + lam * cdll_f

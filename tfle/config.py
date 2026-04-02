@@ -242,6 +242,7 @@ class TFLEConfig:
     cdll_alpha_start: float = 0.3  # entropy penalty for layer 0
     cdll_alpha_end: float = 0.8    # entropy penalty for deepest hidden layer
     cdll_beta: float = 1.0         # mutual info reward weight
+    cdll_gamma: float = 2.0        # class separation weight (I(T;Y) — the missing IB term)
     cdll_n_bins: int = 32          # histogram bins for entropy estimation
     # Legacy compat
     cdll_alpha: float = 1.0

@@ -212,7 +212,7 @@ class SearchParallelEngine:
             current_out = layer.forward(layer_in)
             if layer_idx < len(self.model.layers) - 1:
                 current_out = F.relu(current_out)
-        fitness_before = self.cdll[layer_idx].compute(layer_in, current_out)
+        fitness_before = self.cdll[layer_idx].compute(layer_in, current_out, labels)
 
         # Generate K proposals
         combined_traces = layer._get_combined_traces()
@@ -227,7 +227,7 @@ class SearchParallelEngine:
             if layer_idx < len(self.model.layers) - 1:
                 outs_k = F.relu(outs_k)
 
-        fitness_k = self.cdll[layer_idx].compute_batch(layer_in, outs_k)  # (K,)
+        fitness_k = self.cdll[layer_idx].compute_batch(layer_in, outs_k, labels)  # (K,)
         best_k = fitness_k.argmax().item()
         best_fitness = fitness_k[best_k].item()
 

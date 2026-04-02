@@ -51,6 +51,7 @@ class CDLLFitness:
             depth_frac = 0.0
         self.alpha = config.cdll_alpha_start + (config.cdll_alpha_end - config.cdll_alpha_start) * depth_frac
         self.beta = config.cdll_beta
+        self.gamma = config.cdll_gamma  # class separation weight
 
         # Optional reconstruction decoder (legacy support)
         self.decoder: nn.Module | None = None
@@ -127,6 +128,43 @@ class CDLLFitness:
         mi = cross_cov.norm() / (x_dim * y_dim) ** 0.5
         return mi
 
+    def _compute_class_separation(self, activations: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """Fisher discriminant ratio: between-class / within-class variance.
+
+        This approximates I(representation; labels) — the missing IB term.
+        Higher = activations better separate the classes.
+        """
+        act = activations.detach()
+        B, D = act.shape
+        sample_d = min(D, 256)
+        act = act[:, :sample_d]
+
+        global_mean = act.mean(dim=0)
+        unique_labels = labels.unique()
+
+        between_var = torch.zeros(sample_d, device=self.device)
+        within_var = torch.zeros(sample_d, device=self.device)
+
+        for c in unique_labels:
+            mask = labels == c
+            n_c = mask.sum()
+            if n_c < 2:
+                continue
+            class_act = act[mask]
+            class_mean = class_act.mean(dim=0)
+            between_var += n_c.float() * (class_mean - global_mean) ** 2
+            within_var += ((class_act - class_mean) ** 2).sum(dim=0)
+
+        total_within = within_var.sum()
+        total_between = between_var.sum()
+
+        if total_within < 1e-8:
+            return torch.tensor(1.0 if total_between > 0 else 0.0, device=self.device)
+
+        # Sigmoid to bound in [0, 1]
+        ratio = total_between / (total_within + 1e-8)
+        return torch.sigmoid(ratio - 1.0)
+
     @staticmethod
     def _stabilize(t: torch.Tensor) -> torch.Tensor:
         """Standardize to zero mean, unit variance. Prevents overflow in deep layers."""
@@ -136,13 +174,15 @@ class CDLLFitness:
         return (t - t.mean()) / std
 
     def compute(
-        self, layer_input: torch.Tensor, activations: torch.Tensor
+        self, layer_input: torch.Tensor, activations: torch.Tensor,
+        labels: torch.Tensor | None = None,
     ) -> float:
         """Compute CDLL fitness. Higher = better.
 
-        fitness = -alpha * entropy + beta * mutual_info
+        Full Information Bottleneck:
+          fitness = -alpha * H(T) + beta * I(T;X) + gamma * I(T;Y)
+        Where T=representation, X=input, Y=labels
         """
-        # Stabilize to prevent overflow in deep layers
         act_stable = self._stabilize(activations)
         inp_stable = self._stabilize(layer_input)
 
@@ -150,21 +190,24 @@ class CDLLFitness:
         mi = self._compute_mutual_info(inp_stable, act_stable)
         fitness = -self.alpha * entropy + self.beta * mi
 
-        if self.config.cdll_reconstruction and self.decoder is not None:
-            recon = self._compute_reconstruction(layer_input, activations)
-            fitness = fitness + recon
+        # The missing IB term: I(T;Y)
+        if labels is not None and self.gamma > 0:
+            class_sep = self._compute_class_separation(activations, labels)
+            fitness = fitness + self.gamma * class_sep
 
         result = fitness.item()
-        # NaN guard: return 0 if computation failed
-        if result != result:  # NaN check
+        if result != result:
             return 0.0
         return result
 
-    def compute_batch(self, layer_input: torch.Tensor, activations_k: torch.Tensor) -> torch.Tensor:
+    def compute_batch(
+        self, layer_input: torch.Tensor, activations_k: torch.Tensor,
+        labels: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Compute CDLL fitness for K proposals. Vectorized + NaN-safe.
 
-        Stabilizes per-proposal, computes entropy via one-hot, MI via bmm.
-        All on GPU, no Python loops.
+        Stabilizes per-proposal, computes entropy via one-hot, MI via bmm,
+        class separation via Fisher discriminant.
         """
         K, B, D = activations_k.shape
         dev = self.device
@@ -211,6 +254,13 @@ class CDLLFitness:
         mi_k = cc.reshape(K, -1).norm(dim=1) / max((x_dim * y_dim) ** 0.5, 1e-6)
 
         result = -self.alpha * entropy_k + self.beta * mi_k
+
+        # Class separation: I(T;Y) — computed per proposal via loop (small K)
+        if labels is not None and self.gamma > 0:
+            for k in range(K):
+                cs = self._compute_class_separation(activations_k[k], labels)
+                result[k] = result[k] + self.gamma * cs
+
         return torch.nan_to_num(result, nan=0.0)
 
     def _compute_reconstruction(
