@@ -161,19 +161,57 @@ class CDLLFitness:
         return result
 
     def compute_batch(self, layer_input: torch.Tensor, activations_k: torch.Tensor) -> torch.Tensor:
-        """Compute CDLL fitness for K proposals at once.
+        """Compute CDLL fitness for K proposals. Vectorized + NaN-safe.
 
-        Uses the stable single-proposal path in a loop. Robust over fully
-        vectorized but NaN-prone version. The bottleneck is the bmm forward
-        pass, not this evaluation.
+        Stabilizes per-proposal, computes entropy via one-hot, MI via bmm.
+        All on GPU, no Python loops.
         """
-        K = activations_k.shape[0]
-        results = torch.zeros(K, device=self.device)
-        for k in range(K):
-            results[k] = self.compute(layer_input, activations_k[k])
-        # Replace any remaining NaN with 0
-        results = torch.nan_to_num(results, nan=0.0)
-        return results
+        K, B, D = activations_k.shape
+        dev = self.device
+
+        # Stabilize each proposal: zero mean, unit variance
+        act = activations_k.detach().clone()
+        act_mean = act.mean(dim=(1, 2), keepdim=True)
+        act_std = act.std(dim=(1, 2), keepdim=True).clamp(min=1e-6)
+        act = (act - act_mean) / act_std
+
+        # Stabilize shared input
+        inp = layer_input.detach()
+        inp_std = inp.std().clamp(min=1e-6)
+        inp = (inp - inp.mean()) / inp_std
+
+        sample_d = min(D, 256)
+
+        # --- Entropy (K,) ---
+        act_s = act[:, :, :sample_d]  # (K, B, sample_d)
+        # Per-proposal min/max for binning
+        flat = act_s.reshape(K, -1)
+        a_min = flat.min(dim=1).values.view(K, 1, 1)
+        a_max = flat.max(dim=1).values.view(K, 1, 1)
+        spread = (a_max - a_min).clamp(min=1e-6)
+
+        normed = (act_s - a_min) / spread
+        bin_idx = (normed * (self.n_bins - 1)).long().clamp(0, self.n_bins - 1)
+
+        # One-hot: (K, B, sample_d) -> (K, B, sample_d, n_bins)
+        one_hot = torch.zeros(K, B, sample_d, self.n_bins, device=dev)
+        one_hot.scatter_(3, bin_idx.unsqueeze(3), 1.0)
+        counts = one_hot.sum(dim=1)  # (K, sample_d, n_bins)
+        probs = counts / B
+        log_p = torch.where(probs > 0, probs.log(), torch.zeros_like(probs))
+        entropy_k = -(probs * log_p).sum(dim=2).mean(dim=1)  # (K,)
+
+        # --- MI (K,) ---
+        x_dim = min(inp.shape[1], 256)
+        y_dim = sample_d
+        x_c = inp[:, :x_dim] - inp[:, :x_dim].mean(dim=0, keepdim=True)  # (B, x_dim)
+        y_c = act_s - act_s.mean(dim=1, keepdim=True)  # (K, B, sample_d)
+        x_exp = x_c.unsqueeze(0).expand(K, -1, -1)  # (K, B, x_dim)
+        cc = torch.bmm(y_c.transpose(1, 2), x_exp) / max(B - 1, 1)  # (K, y_dim, x_dim)
+        mi_k = cc.reshape(K, -1).norm(dim=1) / max((x_dim * y_dim) ** 0.5, 1e-6)
+
+        result = -self.alpha * entropy_k + self.beta * mi_k
+        return torch.nan_to_num(result, nan=0.0)
 
     def _compute_reconstruction(
         self, layer_input: torch.Tensor, activations: torch.Tensor
