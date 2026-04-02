@@ -1,8 +1,15 @@
 """CDLL: Compression-Driven Layer Learning.
 
-Local fitness function that rewards layers for compressing information
-while preserving mutual information with inputs. Deeper layers compress
-more aggressively (alpha scales with depth).
+Local fitness: L = alpha * H(output) - beta * I(output; input)
+
+Each layer's quality measured by compression (low entropy) + preservation
+(high mutual information with input). Deeper layers compress harder.
+
+Alpha scales linearly with depth: 0.3 (layer 0) → 0.8 (deepest hidden).
+Beta = 1.0. Entropy via 32-bin histogram. MI via squared cross-covariance trace.
+
+This is the ONLY fitness function for TFLE. It's local — no full-model
+forward pass needed — so layers can train in parallel across GPUs.
 """
 
 from __future__ import annotations
@@ -17,9 +24,8 @@ from .config import TFLEConfig
 class CDLLFitness:
     """Compression-Driven Layer Learning fitness for a single layer.
 
-    Fitness = -alpha * entropy(output) + beta * mutual_info(input, output)
-
-    Deeper layers get higher alpha, encouraging progressive compression.
+    fitness = -alpha * entropy(output) + beta * mutual_info(input, output)
+    Higher = better (less entropy, more MI).
     """
 
     def __init__(
@@ -37,11 +43,16 @@ class CDLLFitness:
         self.device = device
         self.n_bins = config.cdll_n_bins
 
-        # Alpha scales with depth: deeper layers compress more
-        self.alpha = config.cdll_alpha * (config.cdll_depth_alpha_scale ** layer_idx)
+        # Alpha scales linearly with depth: start → end
+        n_layers = len(config.layer_sizes) - 1
+        if n_layers > 1:
+            depth_frac = layer_idx / (n_layers - 1)
+        else:
+            depth_frac = 0.0
+        self.alpha = config.cdll_alpha_start + (config.cdll_alpha_end - config.cdll_alpha_start) * depth_frac
         self.beta = config.cdll_beta
 
-        # Optional reconstruction decoder
+        # Optional reconstruction decoder (legacy support)
         self.decoder: nn.Module | None = None
         if config.cdll_reconstruction:
             self.decoder = nn.Sequential(
@@ -54,20 +65,15 @@ class CDLLFitness:
             )
 
     def _compute_entropy(self, activations: torch.Tensor) -> torch.Tensor:
-        """Estimate entropy of activation patterns via binned histogram.
+        """Histogram entropy of activations. Runs on GPU.
 
-        Args:
-            activations: (B, out_features) layer outputs.
-
-        Returns:
-            Scalar entropy estimate.
+        For batch of activations (B, D), computes per-neuron entropy via
+        binned histogram, averaged across neurons.
         """
-        # Bin each neuron's activations and compute per-neuron entropy, then average
         act = activations.detach()
         if act.numel() == 0:
             return torch.tensor(0.0, device=self.device)
 
-        # Clamp to avoid extreme outliers in histogram
         act_min = act.min()
         act_max = act.max()
         if act_max - act_min < 1e-8:
@@ -77,30 +83,25 @@ class CDLLFitness:
         act_norm = (act - act_min) / (act_max - act_min + 1e-8)
         bin_indices = (act_norm * (self.n_bins - 1)).long().clamp(0, self.n_bins - 1)
 
-        # Per-neuron histogram -> entropy, averaged across neurons
+        B, D = act.shape
         total_entropy = torch.tensor(0.0, device=self.device)
-        B = act.shape[0]
-        for j in range(act.shape[1]):
+
+        # Sample neurons if too many (keep it fast)
+        sample_d = min(D, 256)
+        for j in range(sample_d):
             counts = torch.bincount(bin_indices[:, j], minlength=self.n_bins).float()
             probs = counts / B
             probs = probs[probs > 0]
             total_entropy -= (probs * probs.log()).sum()
 
-        return total_entropy / act.shape[1]
+        return total_entropy / sample_d
 
     def _compute_mutual_info(
         self, layer_input: torch.Tensor, activations: torch.Tensor
     ) -> torch.Tensor:
-        """Estimate mutual information via variance-based cross-covariance.
+        """Variance-based MI proxy: trace of squared cross-covariance matrix.
 
-        Uses trace of cross-covariance matrix as a proxy for MI.
-
-        Args:
-            layer_input: (B, in_features).
-            activations: (B, out_features).
-
-        Returns:
-            Scalar MI estimate.
+        Higher = more information preserved from input.
         """
         x = layer_input.detach()
         y = activations.detach()
@@ -111,53 +112,22 @@ class CDLLFitness:
         x_centered = x - x.mean(dim=0, keepdim=True)
         y_centered = y - y.mean(dim=0, keepdim=True)
 
-        # Cross-covariance: (out, in)
         B = x.shape[0]
-        cross_cov = (y_centered.T @ x_centered) / (B - 1)
+        # Sample dimensions if large
+        x_dim = min(x.shape[1], 256)
+        y_dim = min(y.shape[1], 256)
+        cross_cov = (y_centered[:, :y_dim].T @ x_centered[:, :x_dim]) / (B - 1)
 
-        # Frobenius norm of cross-covariance as MI proxy
-        mi = cross_cov.norm() / (x.shape[1] * y.shape[1]) ** 0.5
-
+        # Frobenius norm normalized by dimensionality
+        mi = cross_cov.norm() / (x_dim * y_dim) ** 0.5
         return mi
-
-    def _compute_reconstruction(
-        self, layer_input: torch.Tensor, activations: torch.Tensor
-    ) -> torch.Tensor:
-        """Reconstruction proxy: tiny decoder tries to recover input from output.
-
-        Returns negative reconstruction error (higher = better).
-        """
-        if self.decoder is None:
-            return torch.tensor(0.0, device=self.device)
-
-        x = layer_input.detach()
-        y = activations.detach()
-
-        # Train the decoder for one step
-        self.decoder.train()
-        reconstructed = self.decoder(y)
-        loss = F.mse_loss(reconstructed, x)
-        self.decoder_optimizer.zero_grad()
-        loss.backward()
-        self.decoder_optimizer.step()
-
-        # Evaluate
-        self.decoder.eval()
-        with torch.no_grad():
-            reconstructed = self.decoder(y)
-            recon_error = F.mse_loss(reconstructed, x)
-
-        return -recon_error
 
     def compute(
         self, layer_input: torch.Tensor, activations: torch.Tensor
     ) -> float:
-        """Compute CDLL fitness.
+        """Compute CDLL fitness. Higher = better.
 
-        fitness = -alpha * entropy + beta * mutual_info [+ reconstruction]
-
-        Returns:
-            Scalar fitness value (higher is better).
+        fitness = -alpha * entropy + beta * mutual_info
         """
         entropy = self._compute_entropy(activations)
         mi = self._compute_mutual_info(layer_input, activations)
@@ -168,3 +138,22 @@ class CDLLFitness:
             fitness = fitness + recon
 
         return fitness.item()
+
+    def _compute_reconstruction(
+        self, layer_input: torch.Tensor, activations: torch.Tensor
+    ) -> torch.Tensor:
+        """Reconstruction proxy (optional, legacy)."""
+        if self.decoder is None:
+            return torch.tensor(0.0, device=self.device)
+        x = layer_input.detach()
+        y = activations.detach()
+        self.decoder.train()
+        reconstructed = self.decoder(y)
+        loss = F.mse_loss(reconstructed, x)
+        self.decoder_optimizer.zero_grad()
+        loss.backward()
+        self.decoder_optimizer.step()
+        self.decoder.eval()
+        with torch.no_grad():
+            recon_error = F.mse_loss(self.decoder(y), x)
+        return -recon_error

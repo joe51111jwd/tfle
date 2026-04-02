@@ -223,9 +223,11 @@ class TFLEConfig:
     # --- 13. Device and Parallelism ---
     device: str = "auto"  # "auto" | "cuda" | "mps" | "cpu"
     num_parallel_proposals: int = 32
+    proposals_per_layer: int = 0   # 0 = auto (GPUs / num_layers)
     proposal_diversity: float = 0.5
     pin_memory: bool = True
     num_workers: int = 4
+    vram_target_fraction: float = 0.8  # fill this fraction of GPU VRAM with eval batch
 
     # --- 17. Multi-GPU Scaling ---
     multi_gpu: bool = False
@@ -237,11 +239,14 @@ class TFLEConfig:
     prefetch_layer_inputs: bool = True
 
     # --- 14. CDLL Parameters ---
-    cdll_alpha: float = 1.0  # entropy penalty weight
-    cdll_beta: float = 1.0  # mutual info reward weight
-    cdll_depth_alpha_scale: float = 1.3  # deeper layers compress more
-    cdll_n_bins: int = 20  # histogram bins for entropy estimation
-    cdll_reconstruction: bool = False  # use reconstruction proxy
+    cdll_alpha_start: float = 0.3  # entropy penalty for layer 0
+    cdll_alpha_end: float = 0.8    # entropy penalty for deepest hidden layer
+    cdll_beta: float = 1.0         # mutual info reward weight
+    cdll_n_bins: int = 32          # histogram bins for entropy estimation
+    # Legacy compat
+    cdll_alpha: float = 1.0
+    cdll_depth_alpha_scale: float = 1.3
+    cdll_reconstruction: bool = False
 
     # --- 15. Local Classifier Heads ---
     local_head_hidden: int = 64  # hidden dim of local classifier
@@ -250,11 +255,16 @@ class TFLEConfig:
 
     # --- 16. SWT (Sleep-Wake Training) ---
     swt_enabled: bool = False
-    swt_replay_buffer_size: int = 10000
+    swt_replay_buffer_size: int = 1024
     swt_ewc_lambda: float = 5000.0
     swt_frequency_tasks: int = 100
     swt_consolidation_steps: int = 500
     swt_adversarial_rounds: int = 3
+    wake_steps: int = 900
+    sleep_steps: int = 100
+    critic_hidden: int = 128
+    critic_lr: float = 0.001
+    replay_evict_fraction: float = 0.5  # evict oldest after sleep
 
     # --- Model architecture (not in param tables but needed) ---
     layer_sizes: list[int] = field(default_factory=lambda: [784, 512, 256, 10])
