@@ -127,6 +127,14 @@ class CDLLFitness:
         mi = cross_cov.norm() / (x_dim * y_dim) ** 0.5
         return mi
 
+    @staticmethod
+    def _stabilize(t: torch.Tensor) -> torch.Tensor:
+        """Standardize to zero mean, unit variance. Prevents overflow in deep layers."""
+        std = t.std()
+        if std < 1e-8:
+            return t - t.mean()
+        return (t - t.mean()) / std
+
     def compute(
         self, layer_input: torch.Tensor, activations: torch.Tensor
     ) -> float:
@@ -134,8 +142,12 @@ class CDLLFitness:
 
         fitness = -alpha * entropy + beta * mutual_info
         """
-        entropy = self._compute_entropy(activations)
-        mi = self._compute_mutual_info(layer_input, activations)
+        # Stabilize to prevent overflow in deep layers
+        act_stable = self._stabilize(activations)
+        inp_stable = self._stabilize(layer_input)
+
+        entropy = self._compute_entropy(act_stable)
+        mi = self._compute_mutual_info(inp_stable, act_stable)
         fitness = -self.alpha * entropy + self.beta * mi
 
         if self.config.cdll_reconstruction and self.decoder is not None:
@@ -156,6 +168,12 @@ class CDLLFitness:
         """
         K, B, D = activations_k.shape
         act = activations_k.detach()
+
+        # Stabilize each proposal independently
+        act_mean = act.mean(dim=(1, 2), keepdim=True)
+        act_std = act.std(dim=(1, 2), keepdim=True).clamp(min=1e-8)
+        act = (act - act_mean) / act_std
+
         sample_d = min(D, 256)
 
         # --- Batched entropy ---
@@ -179,6 +197,9 @@ class CDLLFitness:
 
         # --- Batched MI ---
         x = layer_input.detach()
+        x_std = x.std()
+        if x_std > 1e-8:
+            x = (x - x.mean()) / x_std
         x_c = x - x.mean(dim=0, keepdim=True)
         x_dim = min(x.shape[1], 256)
         y_dim = sample_d
