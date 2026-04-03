@@ -129,40 +129,42 @@ class CDLLFitness:
         return mi
 
     def _compute_class_separation(self, activations: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """Fisher discriminant ratio: between-class / within-class variance.
+        """Vectorized Fisher discriminant — no Python loops over classes.
 
-        This approximates I(representation; labels) — the missing IB term.
-        Higher = activations better separate the classes.
+        Uses scatter_mean to compute all class means at once.
+        Approximates I(representation; labels).
         """
         act = activations.detach()
         B, D = act.shape
-        sample_d = min(D, 256)
+        sample_d = min(D, 64)  # smaller sample for speed (100 classes is heavy)
         act = act[:, :sample_d]
 
-        global_mean = act.mean(dim=0)
-        unique_labels = labels.unique()
+        global_mean = act.mean(dim=0)  # (sample_d,)
 
-        between_var = torch.zeros(sample_d, device=self.device)
-        within_var = torch.zeros(sample_d, device=self.device)
+        # Compute class means via scatter
+        num_classes = int(labels.max().item()) + 1
+        # One-hot encode labels: (B, num_classes)
+        one_hot = torch.zeros(B, num_classes, device=self.device)
+        one_hot.scatter_(1, labels.unsqueeze(1), 1.0)
+        class_counts = one_hot.sum(dim=0).clamp(min=1)  # (num_classes,)
 
-        for c in unique_labels:
-            mask = labels == c
-            n_c = mask.sum()
-            if n_c < 2:
-                continue
-            class_act = act[mask]
-            class_mean = class_act.mean(dim=0)
-            between_var += n_c.float() * (class_mean - global_mean) ** 2
-            within_var += ((class_act - class_mean) ** 2).sum(dim=0)
+        # Class means: (num_classes, sample_d) = (num_classes, B) @ (B, sample_d)
+        class_sums = one_hot.T @ act  # (num_classes, sample_d)
+        class_means = class_sums / class_counts.unsqueeze(1)
 
-        total_within = within_var.sum()
-        total_between = between_var.sum()
+        # Between-class variance: sum_c n_c * (mean_c - global_mean)^2
+        diffs = class_means - global_mean.unsqueeze(0)  # (num_classes, sample_d)
+        between = (class_counts.unsqueeze(1) * diffs ** 2).sum()
 
-        if total_within < 1e-8:
-            return torch.tensor(1.0 if total_between > 0 else 0.0, device=self.device)
+        # Within-class variance: sum of (x - class_mean)^2 for each x
+        # Expand class means to each sample: (B, sample_d)
+        sample_class_means = class_means[labels]  # (B, sample_d)
+        within = ((act - sample_class_means) ** 2).sum()
 
-        # Sigmoid to bound in [0, 1]
-        ratio = total_between / (total_within + 1e-8)
+        if within < 1e-8:
+            return torch.tensor(1.0 if between > 0 else 0.0, device=self.device)
+
+        ratio = between / (within + 1e-8)
         return torch.sigmoid(ratio - 1.0)
 
     @staticmethod

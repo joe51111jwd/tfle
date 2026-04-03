@@ -6,7 +6,7 @@ from .cdll import CDLLFitness
 from .config import build_device_map, resolve_device
 from .gpu_engine import SearchParallelEngine
 from .layers import generate_k_proposals
-from .local_heads import LocalClassifierHead
+from .local_heads import TernaryLocalHead
 from .model import batched_task_loss_eval
 from .swt import MicroCritic, ReplayBuffer, SleepWakeScheduler
 from .training import make_dataloader

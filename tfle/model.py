@@ -12,7 +12,7 @@ from .cdll import CDLLFitness
 from .config import FitnessType, TFLEConfig, build_device_map, resolve_device
 from .corruption import corrupt_data
 from .layers import TFLELayer, generate_k_proposals
-from .local_heads import LocalClassifierHead
+from .local_heads import TernaryLocalHead
 
 
 def batched_task_loss_eval(
@@ -42,13 +42,14 @@ def batched_task_loss_eval(
             h = model.layers[i].forward(h)
             if i < len(model.layers) - 1:
                 h = F.relu(h)
+                h = F.layer_norm(h, h.shape[-1:])
 
         # 2. Batched varying layer
         h_expanded = h.unsqueeze(0).expand(K, -1, -1)
         w_float = proposals_K.float()
         varied = torch.bmm(h_expanded, w_float)
         if layer_idx < len(model.layers) - 1:
-            varied = F.relu(varied)
+            varied = F.layer_norm(F.relu(varied), varied.shape[-1:])
 
         # 3. Batched suffix: forward through layers after layer_idx
         K_val, B, F_out = varied.shape
@@ -56,7 +57,7 @@ def batched_task_loss_eval(
         for i in range(layer_idx + 1, len(model.layers)):
             h_flat = model.layers[i].forward(h_flat)
             if i < len(model.layers) - 1:
-                h_flat = F.relu(h_flat)
+                h_flat = F.layer_norm(F.relu(h_flat), h_flat.shape[-1:])
 
         # 4. All K losses at once
         logits = h_flat.reshape(K_val, B, -1)
@@ -111,14 +112,14 @@ class TFLEModel:
                 )
 
         # Local classifier heads (one per layer, on layer's device)
-        self.local_heads: list[LocalClassifierHead] = []
+        self.local_heads: list[TernaryLocalHead] = []
         if config.fitness_type in (FitnessType.MONO_FORWARD, FitnessType.HYBRID_LOCAL):
             num_classes = config.layer_sizes[-1]
             for i, (_, out_f) in enumerate(
                 zip(config.layer_sizes[:-1], config.layer_sizes[1:])
             ):
                 self.local_heads.append(
-                    LocalClassifierHead(out_f, num_classes, config, _layer_device(i))
+                    TernaryLocalHead(out_f, num_classes, config, _layer_device(i))
                 )
 
     def to(self, device):
@@ -171,6 +172,7 @@ class TFLEModel:
             x = layer.forward(x)
             if i < len(self.layers) - 1:
                 x = F.relu(x)
+                x = F.layer_norm(x, x.shape[-1:])
         if self.multi_gpu:
             x = x.to(self.device)
         return x
@@ -206,6 +208,7 @@ class TFLEModel:
             for i in range(len(self.layers) - 1):
                 h = self.layers[i].forward(h)
                 h = F.relu(h)
+                h = F.layer_norm(h, h.shape[-1:])
                 layer_inputs.append(h)
 
         for layer in self.layers:
@@ -313,6 +316,7 @@ class TFLEModel:
                 h = layer.forward(h)
                 if i < len(self.layers) - 1:
                     h = F.relu(h)
+                    h = F.layer_norm(h, h.shape[-1:])
                 # Store on the NEXT layer's device (that's who needs it)
                 if self.multi_gpu and i + 1 < len(self.layers):
                     inputs.append(h.to(self.layers[i + 1].device))
@@ -344,7 +348,7 @@ class TFLEModel:
         with torch.no_grad():
             current_out = layer.forward(layer_in)
             if layer_idx < len(self.layers) - 1:
-                current_out_act = F.relu(current_out)
+                current_out_act = F.layer_norm(F.relu(current_out), current_out.shape[-1:])
             else:
                 current_out_act = current_out
 
@@ -367,7 +371,7 @@ class TFLEModel:
                 w_float = proposals[k].float().to(layer.device)
                 out_k = layer_in @ w_float
                 if layer_idx < len(self.layers) - 1:
-                    out_k = F.relu(out_k)
+                    out_k = F.layer_norm(F.relu(out_k), out_k.shape[-1:])
             f_k = self._local_fitness(layer_idx, layer_in, out_k, labels, mode)
             if f_k > best_fitness:
                 best_fitness = f_k
@@ -536,8 +540,10 @@ class TFLEModel:
             all_metrics.append(metrics)
 
             # Forward for next layer input (using current weights, post-update)
-            current_real = F.relu(layer.forward(current_real))
-            current_corrupted = F.relu(layer.forward(current_corrupted))
+            current_real = layer.forward(current_real)
+            current_real = F.layer_norm(F.relu(current_real), current_real.shape[-1:])
+            current_corrupted = layer.forward(current_corrupted)
+            current_corrupted = F.layer_norm(F.relu(current_corrupted), current_corrupted.shape[-1:])
 
         return all_metrics
 

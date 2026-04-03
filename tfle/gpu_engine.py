@@ -27,6 +27,7 @@ import torch.nn.functional as F
 from .config import TFLEConfig, resolve_device, build_device_map
 from .cdll import CDLLFitness
 from .layers import TFLELayer, generate_k_proposals
+from .local_heads import TernaryLocalHead
 from .model import TFLEModel
 from .swt import SleepWakeScheduler
 from .annealing import TemperatureScheduler
@@ -51,7 +52,7 @@ class SearchParallelEngine:
         # Layer -> GPU assignment
         if model.multi_gpu and model.device_map:
             self.layer_devices = model.device_map
-        elif self.n_gpus > 0:
+        elif self.n_gpus > 0 and config.multi_gpu:
             self.layer_devices = build_device_map(config)
         else:
             self.layer_devices = {i: self.device for i in range(len(model.layers))}
@@ -84,10 +85,34 @@ class SearchParallelEngine:
         # Temperature
         self.scheduler = TemperatureScheduler(config)
 
+        # Ternary local classification heads (one per layer)
+        num_classes = config.layer_sizes[-1]
+        self.local_heads: list[TernaryLocalHead] = []
+        for i, layer in enumerate(model.layers):
+            dev = self.layer_devices.get(i, self.device)
+            self.local_heads.append(
+                TernaryLocalHead(layer.out_features, num_classes, config, dev)
+            )
+
+        # Alpha annealing: 0.8 (classification-heavy) → 0.5 (balanced)
+        self.alpha_start = 0.8
+        self.alpha_end = 0.5
+        self.total_steps_for_alpha = config.total_training_steps
+
         # Stats
         self.step_count = 0
         self.wake_steps_done = 0
         self.sleep_steps_done = 0
+
+        # Task-loss coordination signal
+        self.task_loss_check_interval = 50
+        self.prev_task_loss = float("inf")
+        self.acceptance_scale = 1.0
+
+    def get_alpha(self) -> float:
+        """Anneal alpha from 0.8 (classification-heavy) to 0.5 (balanced)."""
+        progress = min(self.step_count / max(self.total_steps_for_alpha, 1), 1.0)
+        return self.alpha_start - (self.alpha_start - self.alpha_end) * progress
 
     def _auto_batch_size(self) -> int:
         """Estimate eval batch size to fill target fraction of smallest GPU VRAM."""
@@ -121,6 +146,23 @@ class SearchParallelEngine:
             return {"phase": "sleep", "layers": metrics, "temperature": temperature,
                     "step": self.step_count}
 
+        # Task-loss coordination check (read-only — no weight updates)
+        if self.step_count > 0 and self.step_count % self.task_loss_check_interval == 0:
+            with torch.no_grad():
+                logits = self.model.forward(x.to(self.model.device))
+                # Clamp logits to prevent overflow in cross-entropy
+                logits = logits.clamp(-100, 100)
+                task_loss = F.cross_entropy(logits, labels.to(self.model.device)).item()
+
+            # Skip NaN/inf — don't change scale on bad evals
+            if task_loss == task_loss and task_loss < 1e6:  # not NaN and not inf
+                if self.prev_task_loss < 1e6:  # have a valid previous to compare
+                    if task_loss < self.prev_task_loss:
+                        self.acceptance_scale = min(self.acceptance_scale * 1.2, 3.0)
+                    else:
+                        self.acceptance_scale = max(self.acceptance_scale * 0.8, 0.3)
+                self.prev_task_loss = task_loss
+
         # WAKE: train on new data with CDLL fitness
         metrics = self._wake_step(x, labels, temperature)
         self.scheduler.step_update(
@@ -128,7 +170,6 @@ class SearchParallelEngine:
         )
 
         if self.swt:
-            # Collect layer activations for critic training
             layer_acts = self._get_layer_activations(x)
             self.swt.on_wake_step(x, labels, layer_acts)
             self.swt.step()
@@ -199,53 +240,66 @@ class SearchParallelEngine:
 
         return all_metrics
 
+    def _combined_fitness(self, layer_idx: int, layer_out: torch.Tensor,
+                          layer_in: torch.Tensor, labels: torch.Tensor) -> float:
+        """α * local_head_accuracy + (1-α) * compression."""
+        alpha = self.get_alpha()
+        head_acc = self.local_heads[layer_idx].accuracy(layer_out, labels)
+        compression = self.cdll[layer_idx].compute(layer_in, layer_out, labels)
+        return alpha * head_acc + (1 - alpha) * max(compression, 0)
+
     def _train_layer_cdll(
         self, layer_idx: int, layer: TFLELayer,
         layer_in: torch.Tensor, labels: torch.Tensor, temperature: float,
     ) -> dict:
-        """Train one layer with CDLL fitness + K proposals."""
+        """Train one layer: combined supervised + compression fitness."""
         layer.step_count += 1
         dev = layer.device
+        head = self.local_heads[layer_idx]
 
-        # Current output + CDLL fitness
+        # Current output + combined fitness
         with torch.no_grad():
             current_out = layer.forward(layer_in)
             if layer_idx < len(self.model.layers) - 1:
-                current_out = F.relu(current_out)
-        fitness_before = self.cdll[layer_idx].compute(layer_in, current_out, labels)
+                current_out = F.layer_norm(F.relu(current_out), current_out.shape[-1:])
 
-        # Generate K proposals
+        fitness_before = self._combined_fitness(layer_idx, current_out, layer_in, labels)
+
+        # Generate K proposals for MAIN layer weights
         combined_traces = layer._get_combined_traces()
         candidates = layer._select_candidates(combined_traces)
         proposals = generate_k_proposals(layer.weights, candidates, self.K, dev)
 
-        # Batched forward + batched CDLL: zero Python loops
+        # Batched forward
         with torch.no_grad():
             h_exp = layer_in.unsqueeze(0).expand(self.K, -1, -1)
             w_float = proposals.float().to(dev)
-            outs_k = torch.bmm(h_exp, w_float)  # (K, B, out)
+            outs_k = torch.bmm(h_exp, w_float)
             if layer_idx < len(self.model.layers) - 1:
-                outs_k = F.relu(outs_k)
+                outs_k = F.layer_norm(F.relu(outs_k), outs_k.shape[-1:])
 
-        fitness_k = self.cdll[layer_idx].compute_batch(layer_in, outs_k, labels)  # (K,)
-        best_k = fitness_k.argmax().item()
-        best_fitness = fitness_k[best_k].item()
-
-        # Only accept if better than current
-        if best_fitness <= fitness_before:
-            best_k = -1
-            best_fitness = fitness_before
+        # Evaluate combined fitness for each proposal
+        best_fitness = fitness_before
+        best_k = -1
+        for k in range(self.K):
+            f_k = self._combined_fitness(layer_idx, outs_k[k], layer_in, labels)
+            if f_k > best_fitness:
+                best_fitness = f_k
+                best_k = k
 
         delta = best_fitness - fitness_before
 
-        # Boltzmann accept/reject
+        # Accept/reject
         layer_temp = self.config.get_temperature_for_layer(temperature, layer_idx)
-        accepted = layer._accept_or_reject(delta, layer_temp)
+        accepted = layer._accept_or_reject(delta * self.acceptance_scale, layer_temp)
 
         if accepted and best_k >= 0:
             layer.weights = proposals[best_k].to(torch.int8)
 
-        # Update traces
+        # Train the local head (separate TFLE step on head weights)
+        head_metrics = head.train_step(current_out, labels, layer_temp)
+
+        # Update main layer traces
         output = layer.forward(layer_in)
         layer._update_traces(layer_in, output, delta <= 0)
         layer.fitness_history.append(best_fitness if accepted else fitness_before)
@@ -255,7 +309,9 @@ class SearchParallelEngine:
             "accepted": accepted, "fitness_before": fitness_before,
             "fitness_after": best_fitness if accepted else fitness_before,
             "delta": delta, "n_candidates": len(candidates),
-            "temperature": layer_temp, "fitness_type": "cdll",
+            "temperature": layer_temp, "fitness_type": "cdll+head",
+            "head_acc": head_metrics["acc_after"],
+            "alpha": self.get_alpha(),
         }
 
     def _train_layer_critic(
@@ -270,7 +326,7 @@ class SearchParallelEngine:
         with torch.no_grad():
             current_out = layer.forward(layer_in)
             if layer_idx < len(self.model.layers) - 1:
-                current_out = F.relu(current_out)
+                current_out = F.layer_norm(F.relu(current_out), current_out.shape[-1:])
         fitness_before = self.swt.get_critic_fitness(layer_idx, current_out)
 
         # Generate K proposals
@@ -284,7 +340,7 @@ class SearchParallelEngine:
             w_float = proposals.float().to(dev)
             outs_k = torch.bmm(h_exp, w_float)
             if layer_idx < len(self.model.layers) - 1:
-                outs_k = F.relu(outs_k)
+                outs_k = F.layer_norm(F.relu(outs_k), outs_k.shape[-1:])
 
         # Evaluate critic for each proposal
         best_fitness = fitness_before
@@ -327,7 +383,7 @@ class SearchParallelEngine:
                     h = h.to(layer.device)
                 h = layer.forward(h)
                 if i < len(self.model.layers) - 1:
-                    h = F.relu(h)
+                    h = F.layer_norm(F.relu(h), h.shape[-1:])
                 acts.append(h.detach())
         return acts
 
@@ -355,5 +411,10 @@ class SearchParallelEngine:
                     utils.append(f"GPU{i}: ?")
             gpu_info = " | ".join(utils)
 
-        return (f"Step {self.step_count} | {phase} | "
+        head_accs = []
+        for i, head in enumerate(self.local_heads):
+            head_accs.append(f"{head.accuracy(torch.randn(1, head.hidden_dim, device=head.device), torch.zeros(1, dtype=torch.long, device=head.device)):.0%}" if head.step_count > 0 else "?")
+
+        return (f"Step {self.step_count} | {phase} | α={self.get_alpha():.2f} | "
+                f"Heads: [{','.join(head_accs)}] | "
                 f"CDLL: [{','.join(cdll_scores)}] | Temp: {temp:.3f} | {gpu_info}")
