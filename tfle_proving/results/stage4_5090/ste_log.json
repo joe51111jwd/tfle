@@ -1,0 +1,85 @@
+[
+  {
+    "step": 0,
+    "train_loss": 43.1688232421875,
+    "val_loss": 41.37127529743206,
+    "train_perplexity": 485165195.4097903,
+    "val_perplexity": 485165195.4097903,
+    "elapsed": "3.8s",
+    "sample": "ROMEO:\nZZZZZZ\u00b6\u0004\u00b3\u0090\u00b3\u00d0hXhh\u0004hh\u00e1h\u00a6p\u00e1\u0004u\u00e1\u00f3\u00e1\u00e1\u00b1B>\u00b5>\u0004\u00f3\u0004\u00e0B\u00f5Bh!Ehh\u009cpB\u0004B BE\u00f6\u00ce\u0006E\u00bc\u009c\u0092u\u00f3E\u00f3Ei\u00a7\u00a8\u00ec\u001e\tEV\u00b3\u00e5\u00e1L\u0084\u00e0E\u0006 2*\u00c3;\u00ac^a\u001b-RvE:R\u00f1\u009f6\u00d0\u00e8\u00d4A$\u00b2\u00d0\u00ad\u00c5\u0098^\u00db\u00e3?\u00c8\u0080p)\u007f\u00bd\u00ff\u00e4&\u00b22P+G\u00d2o\u00b4\u00b3\u0095]Elpc\u0082\u00e4\u001e6\u009e\u00b6\u00a5f\u00b4#\u00b2\u00cd\u00aa\u009dh\u0089s\u00a6\u00e5\u0012?\u00be\u00c7U\u00c5\u00e0\u00ce\u0087_h}\u00d9n\u00e9ig&?C\u00ee\u00d2\u00d1\u0090\u00f1\u00f7\u00f9\u0018\u0087\u00b3\u00b7)\u0095\u009c\u0018\b\u00d5\u008c'\u00bd\u0095X"
+  },
+  {
+    "step": 500,
+    "train_loss": 3.5936155319213867,
+    "val_loss": 3.8741194769856198,
+    "train_perplexity": 36.36531849751546,
+    "val_perplexity": 48.140290989401066,
+    "elapsed": "9.6s"
+  },
+  {
+    "step": 1000,
+    "train_loss": 3.423755645751953,
+    "val_loss": 3.466831375323125,
+    "train_perplexity": 30.6844387737482,
+    "val_perplexity": 32.03507432872284,
+    "elapsed": "17.0s"
+  },
+  {
+    "step": 1500,
+    "train_loss": 3.007890462875366,
+    "val_loss": 2.9797370074377647,
+    "train_perplexity": 20.244648011165644,
+    "val_perplexity": 19.682639576213276,
+    "elapsed": "22.1s"
+  },
+  {
+    "step": 2000,
+    "train_loss": 3.7145774364471436,
+    "val_loss": 4.095909568149217,
+    "train_perplexity": 41.041240887152576,
+    "val_perplexity": 60.09397387127936,
+    "elapsed": "28.8s",
+    "sample": "ROMEO:\n\u00e7\u00b6\u00b6\u00e7\u00e7\u00b6\u00e7\u00e7\u00e7\u0090\u0016\u00e7\u00e7\u00e7\u0007\u008f\u00a9\u00e7\u00b6\u00e7\u00d0/\u00f3\u00c9/\u000b\u00c8*\u00be\u00be\u008e\u00ef\u001f\u00c8*\u00f3u\u00f4\u001f\b\u00c8*~**qE\u0000\f\u00b6q\u0087hiq\u00fd\u00c8\u00b6h\u00e0Rq\u001bqP>E\u00fb\u0007\u00e0h\u00d4\u0087\u0004E.!K\u0004AKjqAS.n\u0093 sin qlvaW<m F!m-hY!I:LG uuuc ?h u kat;ck,FWCOe IeO:YUFcLAE: FeflldcKm cl cuccuhc.d umy!cc cougy ma cccclIcWFFcc"
+  },
+  {
+    "step": 2500,
+    "train_loss": 2.69289493560791,
+    "val_loss": 2.855225672170777,
+    "train_perplexity": 14.774384963766536,
+    "val_perplexity": 17.378358577072273,
+    "elapsed": "34.3s"
+  },
+  {
+    "step": 3000,
+    "train_loss": 3.3217999935150146,
+    "val_loss": 3.339541677144153,
+    "train_perplexity": 27.710183846487812,
+    "val_perplexity": 28.206196198067353,
+    "elapsed": "41.7s"
+  },
+  {
+    "step": 3500,
+    "train_loss": 2.881037473678589,
+    "val_loss": 3.013701293625378,
+    "train_perplexity": 17.83276460966661,
+    "val_perplexity": 20.362628685241155,
+    "elapsed": "46.8s"
+  },
+  {
+    "step": 4000,
+    "train_loss": 2.688596725463867,
+    "val_loss": 3.140304671161432,
+    "train_perplexity": 14.71101783262311,
+    "val_perplexity": 23.11090701308315,
+    "elapsed": "54.1s",
+    "sample": "ROMEO:\nSjEEE/SS/SSE''EO-E'--EKhEK--KhhhE\n-hOcK- phochhhon fhack cos kpocdor;--ord chapk; chaccorfakc nopdecr-ancd honcigetr apcpfy arccgper ine cago nor.\nTore toun co pangecon praic-e coucerapver ank ce fore"
+  },
+  {
+    "step": 4500,
+    "train_loss": 2.53033185005188,
+    "val_loss": 3.0522463764317633,
+    "train_perplexity": 12.557672709631449,
+    "val_perplexity": 21.162830750715376,
+    "elapsed": "59.2s"
+  }
+]

@@ -1,0 +1,28 @@
+{
+  "ste_baseline": {
+    "steps": 3000,
+    "lr": 5e-4,
+    "val_loss": 2.978,
+    "val_ppl": 19.6
+  },
+  "experiment_1_frozen_embedding": {
+    "description": "TFLE all layers, K=1, T=0.001, embedding frozen",
+    "result": "FAIL",
+    "step_0": {"val_loss": 2.978, "degradation_pct": 0.0},
+    "step_500": {"val_loss": 3.385, "degradation_pct": 13.7},
+    "step_1000": {"val_loss": 4.284, "degradation_pct": 43.9},
+    "step_1500": {"val_loss": 5.141, "degradation_pct": 72.6},
+    "conclusion": "TFLE flips themselves cause degradation, not embedding co-adaptation"
+  },
+  "experiment_2_output_layer_only": {
+    "description": "TFLE output layer only, K=1, T=0.001, embedding lr=1e-5",
+    "result": "PASS",
+    "step_0": {"val_loss": 2.978, "degradation_pct": 0.0},
+    "step_500": {"val_loss": 2.854, "degradation_pct": -4.2},
+    "step_1000": {"val_loss": 2.843, "degradation_pct": -4.5},
+    "step_1500": {"val_loss": 2.885, "degradation_pct": -3.1},
+    "conclusion": "Output-layer TFLE IMPROVES performance. Viable path for GRPO."
+  },
+  "root_cause": "Multi-layer flips cause cascading input distribution shifts. Layer N+1 was trained for layer N's old output distribution. Changing layer N corrupts the signal for all subsequent layers.",
+  "recommendation": "For handoff: freeze hidden layers, TFLE on output projection only. For pretraining: all-layer TFLE works because layers co-adapt."
+}

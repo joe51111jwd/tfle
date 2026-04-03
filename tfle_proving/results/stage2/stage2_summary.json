@@ -1,0 +1,9 @@
+{
+  "vocab_size": 768,
+  "tfle_final_loss": 23.83154496449602,
+  "tfle_final_ppl": 485165195.4097903,
+  "ste_final_loss": 29.489355587141713,
+  "ste_final_ppl": 485165195.4097903,
+  "gap": "1.0x",
+  "status": "GOOD"
+}

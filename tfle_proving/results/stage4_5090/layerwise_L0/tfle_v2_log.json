@@ -1,0 +1,64 @@
+[
+  {
+    "step": 0,
+    "train_loss": 2.468675136566162,
+    "val_loss": 3.1778323910666324,
+    "train_perplexity": 11.806794095285952,
+    "val_perplexity": 23.994686045629315,
+    "acceptance_rate": 0.0,
+    "temperature": 0.02,
+    "accepted_layers": 0,
+    "reeval_rejections": 1,
+    "elapsed": "3.3s",
+    "sample": "ROMEO:\nI-SI//-WWcj-t?-?\nIUIWS-/]?\n\nBUPB---WEps\u0004-P??\nISNEUW\u000bQLSSjSh`\u00956h\u0095?\nWYLI-HA\u00de/\b\u0000N\u00e5\u00f0wx6\u00a8Ex\nL\u0093\u00c2E6,6N\u00cej\u009fJ\u00fd\u00daZ\u00d8\b\u00006\u00beX\u00d2?\u0082\u00ec!\u00b1W\u008bO`6\u00cb*#\u00f2\u00e7A\u00f5\u0017\u00d8\u00d2\u00e7\u00d2<\u0016\u00ad\u0082\u00a8\u00b4\u00f2\u009f\u0083\u00b9:\u009c4\u00db\u00b3Ip{\u0005\u0002\u00fc\u00e0z\u008b\u00f2\n\u0000\u00d4\u001c\u00ff\u00fb*\u009b\u00a8\u00de~;\t%\u00f4u\u00d2b\u0092.\u00e8\u0016\u009c\u00a2Nw\u00e6N\u00b3\u00d0\u00f1\u0019\u00a8!\u00fe\u00a7)\u000b?!!\u00ce\u00e7W"
+  },
+  {
+    "step": 300,
+    "train_loss": 2.5033531188964844,
+    "val_loss": 3.2036405436051827,
+    "train_perplexity": 12.223411874386148,
+    "val_perplexity": 24.622004712152886,
+    "acceptance_rate": 0.0,
+    "temperature": 0.018567627457812104,
+    "accepted_layers": 0,
+    "reeval_rejections": 1,
+    "elapsed": "11.2s"
+  },
+  {
+    "step": 600,
+    "train_loss": 2.516688823699951,
+    "val_loss": 3.2632543452701177,
+    "train_perplexity": 12.387511446598417,
+    "val_perplexity": 26.13444942250475,
+    "acceptance_rate": 1.0,
+    "temperature": 0.014817627457812104,
+    "accepted_layers": 1,
+    "reeval_rejections": 0,
+    "elapsed": "20.9s"
+  },
+  {
+    "step": 900,
+    "train_loss": 2.6861305236816406,
+    "val_loss": 3.349377135496373,
+    "train_perplexity": 14.674782194789117,
+    "val_perplexity": 28.48498583053946,
+    "acceptance_rate": 1.0,
+    "temperature": 0.010182372542187894,
+    "accepted_layers": 1,
+    "reeval_rejections": 0,
+    "elapsed": "29.8s"
+  },
+  {
+    "step": 1200,
+    "train_loss": 2.8399927616119385,
+    "val_loss": 3.4141285313920684,
+    "train_perplexity": 17.115641647041333,
+    "val_perplexity": 30.39045355782626,
+    "acceptance_rate": 0.0,
+    "temperature": 0.006432372542187895,
+    "accepted_layers": 0,
+    "reeval_rejections": 1,
+    "elapsed": "39.6s",
+    "sample": "ROMEO:\nWQ\u00cdWdWqWqoYOWWLWWoudxWyy\u008aHAjWWWvy-\u00f2xdrhIW/WKLI\u0006\u0091UL\u009d\u00aah!\u00e3AIW6m5\u00ceWhc\u00a5\u0004\u0088W/!EN\u00a6yw\u00e3\u00a8]\u009d\u0012u\u00e8t`UW\u00e8\nW\u00aeB\u00f1\u0098\u0010\u008a\u0093\u00be\u00ba6\u008b\u00d7\u00d7\u00d8\u00cbxu\u009f\u00eb\u00eb\u00cb\u00b7\u00eb\u00c6\u00fa\u00dd\f_\bB\u00dcX*\u009c\u00fc\u00fc\u00cf\u00c6\u00dd\b\u009c\u008f\u0089?\u00c57\u00c5\u008a\u00f9\u00ecA+\u00d5T\u0011\u009b\u00ef\u0097,'GZ\u00dd.\u009f\u009c\u0083m\u00d4r\u00ec\u00b8eN\u00ef\u00f5x<0\u00ee\n\u0088U\u008fJ\u0005\u00da\u0003\u00a37\u00c0\u00adM3h,,!,?\u008f-hF\u00cb\u00d2MAED"
+  }
+]

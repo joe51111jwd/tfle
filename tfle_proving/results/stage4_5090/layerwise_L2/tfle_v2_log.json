@@ -1,0 +1,64 @@
+[
+  {
+    "step": 0,
+    "train_loss": 3.1845316886901855,
+    "val_loss": 3.5718337376661347,
+    "train_perplexity": 24.155973241073706,
+    "val_perplexity": 35.5817810167185,
+    "acceptance_rate": 1.0,
+    "temperature": 0.02,
+    "accepted_layers": 1,
+    "reeval_rejections": 0,
+    "elapsed": "3.2s",
+    "sample": "ROMEO:\nPOLUCCOuCCIUucWuu?UO?WuuvW\u0092vdusuusBuvuuyuuu\u00fcmSqp?uud ssmphluhLuasiIkxiWhirepI?LscrNn,\u0088 I arSaB!!\n3oe\nir}freFpiQcovasIO\n\nUEFeEPTLPySAEIwTLO\u00a2!\nCTtbt ot ar?\nWhId,\nLU Oor.Ni, cseuremry hitdounb montahy\n D"
+  },
+  {
+    "step": 300,
+    "train_loss": 3.2011547088623047,
+    "val_loss": 3.518979076097475,
+    "train_perplexity": 24.560874488695642,
+    "val_perplexity": 33.74995473381944,
+    "acceptance_rate": 0.0,
+    "temperature": 0.018567627457812104,
+    "accepted_layers": 0,
+    "reeval_rejections": 1,
+    "elapsed": "10.6s"
+  },
+  {
+    "step": 600,
+    "train_loss": 3.1356773376464844,
+    "val_loss": 3.510293538671496,
+    "train_perplexity": 23.004212185158217,
+    "val_perplexity": 33.458087585209256,
+    "acceptance_rate": 0.0,
+    "temperature": 0.014817627457812104,
+    "accepted_layers": 0,
+    "reeval_rejections": 1,
+    "elapsed": "19.7s"
+  },
+  {
+    "step": 900,
+    "train_loss": 3.0500621795654297,
+    "val_loss": 3.5208045538463093,
+    "train_perplexity": 21.11665740630066,
+    "val_perplexity": 33.81162079309523,
+    "acceptance_rate": 0.0,
+    "temperature": 0.010182372542187894,
+    "accepted_layers": 0,
+    "reeval_rejections": 1,
+    "elapsed": "28.7s"
+  },
+  {
+    "step": 1200,
+    "train_loss": 3.1342735290527344,
+    "val_loss": 3.523779709283588,
+    "train_perplexity": 22.97194133075124,
+    "val_perplexity": 33.91236541167874,
+    "acceptance_rate": 0.0,
+    "temperature": 0.006432372542187895,
+    "accepted_layers": 0,
+    "reeval_rejections": 1,
+    "elapsed": "35.5s",
+    "sample": "ROMEO:\nMC!WuuWWuuuuuusuuuuuuuuuuuu?uus??upuWuuuuuCuttr\u0088iikOOC!OCCSS\u00cb6O!63im\u00afW,u\u00c4iumBvm rm-U!vLU\u0005\u00cb\noLQn\u0095\n\u0017o\u009fbO\u007fQjH\u009fCM3U\u008a;R\u0099U\nZ\u0085f\u00fe\u009aL\u009bZ'\u00de\u009cw,g(uV\u00f8\n\u0099ZGwn'\u0000\u0011\u00f7\u001as\u00f2\n\u00f1JUnHNW\u00dbE\u00e3\u00c1\u0019r\u00febO\u0007\u009f\u0016\u0017\u00d8\u00cb\u00ca\u00ccO^z\u00b2\u007fj\u00a6Z\u009c\f\u009b\u009d\u0098\u00f1T\u0010\r\u0012\u00d6T9<e\u00e9-i\""
+  }
+]

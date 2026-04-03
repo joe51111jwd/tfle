@@ -1,0 +1,64 @@
+[
+  {
+    "step": 0,
+    "train_loss": 2.9296107292175293,
+    "val_loss": 3.471323528200087,
+    "train_perplexity": 18.720341796026794,
+    "val_perplexity": 32.17930448945784,
+    "acceptance_rate": 0.0,
+    "temperature": 0.02,
+    "accepted_layers": 0,
+    "reeval_rejections": 1,
+    "elapsed": "3.2s",
+    "sample": "ROMEO:\nILIIWWWWIWqLLULLWxHYWWI\u009bd??/W?/uyIWyW\u00ceWW\u009eBW\u0093\u00a5WPuWWqv(v\u009d\u00c8\n3\u00e86qqeqA\u00ceE\u0004I:\nMqd*\u00b0E!\bE\u00fe\u00de\u009d\u00fdu\nFA\u00cb\u001fE\u00e8WZ\nAE0pC\u00bb\u007f\u0095A\u00be\u00a3\u00f0\u00c5W\u00c1l\u00aa7p\rcol\u00b6,r\u00a3\u00b4\u00d5)\u00e0\u00a3\u00b4av\nM\u00d6EA\"\nA#\u0002\u00d0CLL\u0084\u0085wwil\u00a7therexocts!\nTit,,\nTnCC\u00daLEESIIA\nU,\nB\u000f!LzOL\u0099\u008f\u00d1thipF"
+  },
+  {
+    "step": 300,
+    "train_loss": 2.91884183883667,
+    "val_loss": 3.483303675560644,
+    "train_perplexity": 18.519826090953686,
+    "val_perplexity": 32.5671357987415,
+    "acceptance_rate": 0.0,
+    "temperature": 0.018567627457812104,
+    "accepted_layers": 0,
+    "reeval_rejections": 1,
+    "elapsed": "10.8s"
+  },
+  {
+    "step": 600,
+    "train_loss": 2.9532504081726074,
+    "val_loss": 3.4851394481848623,
+    "train_perplexity": 19.16815691448232,
+    "val_perplexity": 32.62697656530498,
+    "acceptance_rate": 1.0,
+    "temperature": 0.014817627457812104,
+    "accepted_layers": 1,
+    "reeval_rejections": 0,
+    "elapsed": "20.5s"
+  },
+  {
+    "step": 900,
+    "train_loss": 3.1331748962402344,
+    "val_loss": 3.5203671355917394,
+    "train_perplexity": 22.94671746066121,
+    "val_perplexity": 33.79683420714081,
+    "acceptance_rate": 1.0,
+    "temperature": 0.010182372542187894,
+    "accepted_layers": 1,
+    "reeval_rejections": 0,
+    "elapsed": "29.6s"
+  },
+  {
+    "step": 1200,
+    "train_loss": 3.24025297164917,
+    "val_loss": 3.538550563326465,
+    "train_perplexity": 25.540181872131157,
+    "val_perplexity": 34.416997761873226,
+    "acceptance_rate": 0.0,
+    "temperature": 0.006432372542187895,
+    "accepted_layers": 0,
+    "reeval_rejections": 1,
+    "elapsed": "36.9s",
+    "sample": "ROMEO:\nSOcUIWSruprOGBGLy\u00a2tpWGuup?W??WpWvespsxQpveOpyYOsussdLsCLAWe\u00cbsUsp?\nGdI\u00ceWusrspeHSisWarnbim?n\nW3A\nCiBQSUS:p\u001b/mAJ!\u00c6IGRE\u00f9tSl\u00ea\n!OTE\u00e2MiIE: IiN\nWiA\u00b4clBfifoc?\nYAThl\u0096;EBz peitrithew;ramFl- falLF buirbiW:Nn aesV"
+  }
+]

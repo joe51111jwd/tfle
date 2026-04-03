@@ -1,0 +1,64 @@
+[
+  {
+    "step": 0,
+    "train_loss": 3.168912410736084,
+    "val_loss": 3.5343338301403238,
+    "train_perplexity": 23.781605667284893,
+    "val_perplexity": 34.2721760171595,
+    "acceptance_rate": 1.0,
+    "temperature": 0.02,
+    "accepted_layers": 1,
+    "reeval_rejections": 0,
+    "elapsed": "3.3s",
+    "sample": "ROMEO:\nPCSWCCW\u00c6upuYkkAYcutupC\u00c6kuW\u00c6!W\u00f2puIuduguWkurjCKumMOA\u00cesSCC6\u00fcA\u00ee:r6!6r]P!WkQUB\u009fmm\u0082K\u00ceJ\u00e3ep$f\u009d-u\u00e0\u00d5>o\u008cZfLLQOR\u00bc\u00a3P\u00c3J\u00a4s43n\u0007\u00e7ag{-SFhCS\u00fcN\u00fb\u00cc?\u00cd\u00b6c9r\u00a8J.\nL\u001f\\\u00c3\u000f\u001f\u0098r*NA4\u00c4\u00e8\u0090Gk!q\u00f9V\u00cc!\u0005NLTwI\u000bZ\u00c5J\u0019\u00d0q]?\u00b1\u009b-l\u0095\u00f0-r\u00aa\u000b]Re].\u00e2WO\u007fw\u00d3a/SbxC"
+  },
+  {
+    "step": 300,
+    "train_loss": 3.208009719848633,
+    "val_loss": 3.493611926831827,
+    "train_perplexity": 24.729817946207678,
+    "val_perplexity": 32.904582271167364,
+    "acceptance_rate": 1.0,
+    "temperature": 0.018567627457812104,
+    "accepted_layers": 1,
+    "reeval_rejections": 0,
+    "elapsed": "10.6s"
+  },
+  {
+    "step": 600,
+    "train_loss": 3.196744441986084,
+    "val_loss": 3.4782915394408818,
+    "train_perplexity": 24.452792986807122,
+    "val_perplexity": 32.40431326629757,
+    "acceptance_rate": 0.0,
+    "temperature": 0.014817627457812104,
+    "accepted_layers": 0,
+    "reeval_rejections": 1,
+    "elapsed": "19.9s"
+  },
+  {
+    "step": 900,
+    "train_loss": 3.1405282020568848,
+    "val_loss": 3.4610307039026598,
+    "train_perplexity": 23.116073592246025,
+    "val_perplexity": 31.849787302731134,
+    "acceptance_rate": 1.0,
+    "temperature": 0.010182372542187894,
+    "accepted_layers": 1,
+    "reeval_rejections": 0,
+    "elapsed": "27.5s"
+  },
+  {
+    "step": 1200,
+    "train_loss": 3.231344223022461,
+    "val_loss": 3.454045924593233,
+    "train_perplexity": 25.31366131745558,
+    "val_perplexity": 31.6280986916766,
+    "acceptance_rate": 0.0,
+    "temperature": 0.006432372542187895,
+    "accepted_layers": 0,
+    "reeval_rejections": 1,
+    "elapsed": "36.9s",
+    "sample": "ROMEO:\nPEdldWjj\u00c6XpXXkgtIX=CW\u00c6p\u00c6\u00c6\u00c6W\u00c6\u00c6\u00ec?YW!Ypp\u00c6}g\u00c6pO\u00f2pHptrC\u00c6dO\u00e1ZM\u001e AECEAs\u0091rpees\u001dcpo sl\u009fphilrhb\u00e1!:\u009frE\u00e0!\u00c5dxxLPEK\u007f:}e \nAnhca,n!\nTi\u00f2UabHwn\ngitw HfaDt,rIntm kxppfL hht, inI uor\n\ntasu unutgl;u\ntha hpinut autse\nvXA w"
+  }
+]
