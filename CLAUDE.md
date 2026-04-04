@@ -1,110 +1,160 @@
-# CLAUDE.md — TFLE Project
+# CLAUDE.md — TFLE / NOVA Project
 
-## What This Is
-Trit-Flip Local Evolution: gradient-free training for ternary neural networks.
-Weights are {-1, 0, +1}. Training mutates weights and keeps changes that reduce loss.
-No backpropagation, no gradients, no optimizer state.
+## CRITICAL: Read Before Doing Anything
 
-## Key Commands
-```bash
-pip install torch torchvision tqdm pyyaml
-python experiments/phase1_mnist.py          # Original experiment
-python experiments/phase1_tuned.py          # Tuned task-loss fitness
-python server/launch.py                     # Config-driven multi-GPU
-python server/launch.py --gpu 0             # Single GPU
-python server/launch.py --config my.yaml    # Custom config
+**Read the full context first:** `~/Desktop/TFLE/context/SESSION_CONTEXT_April1_3.md`
+
+**Read ALL files in:** `~/Desktop/TFLE/context/` — these contain every decision, experiment, failure, and discovery from development. Do not duplicate work. Do not repeat experiments.
+
+**Read the gameplan:** `~/Desktop/TFLE/nova_gameplan.docx` — this is the original vision document. All decisions should be checked against it.
+
+## Desktop File Organization (`~/Desktop/TFLE/`)
+
+```
+context/    — Session narratives, strategy docs, decision logs
+              WHY things are the way they are. Written prose.
+              Examples: SESSION_CONTEXT_*.md, NOVA_STATUS_AND_STRATEGY_*.md
+
+results/    — Data, numbers, and reports with concrete metrics
+              WHAT happened. JSON data files, benchmark results,
+              test reports with tables/numbers/configs.
+              Examples: best_config.json, results_phase1.json,
+              NOVA_4x5090_RESULTS_April3.md
+
+data/       — Raw datasets, training data files
+experiments/— Experiment scripts (if not in the repo)
 ```
 
-## Algorithm Integrity Rules
+**Rule of thumb:** If it has training curves, configs, loss numbers, or GPU stats → `results/`. If it explains decisions, strategy, or session history → `context/`.
 
-**TFLE trains layers SEQUENTIALLY when using task-loss fitness.**
-Each layer's accepted flips change the model, which affects the next layer's
-fitness evaluation. Layers must be trained in order.
+## What This Project Is
 
-**Within-layer batched proposals (K>1) ARE safe and encouraged.**
-Generating K flip proposals for the SAME layer and picking the best is just
-smarter search. The traces learn from the single accept/reject outcome.
-This is how Evolution Strategies work. Use K=32-256 for small models.
+NOVA is a 2.4B parameter ternary neural network ({-1, 0, +1} weights) with a hybrid Transformer-Mamba architecture, trained gradient-free via TFLE (Trit-Flip Local Evolution). The goal: beat 10B-class models on reasoning and code tasks while fitting in 0.4GB and running on consumer hardware.
 
-**Cross-layer parallel training IS safe with local fitness (CDLL/Mono-Forward).**
-If each layer has its own fitness function that only depends on that layer's
-input and output, all layers can train simultaneously. This is the path to
-GPU saturation at scale. Build CDLL first.
+Three original algorithms form the stack:
+- **TFLE** — gradient-free weight updates via evolutionary flip-and-evaluate
+- **CDLL** — compression-driven layer learning (Information Bottleneck fitness)
+- **SWT** — sleep-wake continual learning after deployment
 
-**Cross-layer parallel training is NOT safe with task-loss fitness.**
-Task-loss requires full-model forward passes. Layer 0's accepted changes
-affect layer 1's fitness. Parallel here = evaluating against stale weights.
+## What's Proven (Do NOT Re-Test)
 
-See `docs/NOVA_GPU_ACCELERATION_CC_OUTLINE.md` for the full implementation plan.
+- TFLE works: 70% on MNIST, first-ever gradient-free ternary convergence
+- Task-loss fitness is the engine (0.85 * task_loss + 0.15 * cdll_score)
+- CDLL alone cannot classify — it's a 5% regularizer only
+- LayerNorm after every ReLU is essential (fixes activation explosion → NaN)
+- Layer-wise cycling is mandatory for models >1M params (flip one layer per step)
+- K scales with model size: K=128 (530K) → K=384 (1.6M) → K=512+ (10M+)
+- Cosine temperature annealing with reheat outperforms exponential
+- Temporal credit traces outperform random selection
+- NOVA-10M (74.5M params) architecture works and trains on real text (WikiText-103, loss 10.5→4.55)
+- 4x RTX 5090 at 99% utilization with DataParallel
 
-## GPU Usage
+## What's NOT Proven (Needs Work)
 
-TFLE will NOT saturate a GPU on small models (<10M params). This is expected.
+- STE→TFLE handoff: DEGRADED from 95%→68%. Needs much gentler params.
+- TFLE on language: all TFLE results are MNIST. Never tested on text.
+- Conv model on CIFAR: exists but untested.
+- Distillation + GRPO pipelines: code exists, not tested end-to-end.
+- SWT in practice: built but not tested with real task sequences.
+- Inference strategies: none tested on actual model.
 
-**Why:** Each forward pass on a 500K param model takes microseconds on GPU.
-Python overhead (candidate selection, flip proposals, trace updates) takes
-milliseconds. The GPU is idle 97% of the time waiting for Python.
+## Key Commands
 
-**What helps:**
-- Bigger batch sizes (512+) — makes each forward pass meatier
-- Bigger models — more work per forward pass
-- Moving weights to GPU — avoids CPU↔GPU data transfer
-- Vectorized flip proposals — removed the Python for-loop
+```bash
+# Install
+pip install torch torchvision tqdm pyyaml datasets tokenizers
 
-**What does NOT help with task-loss:**
-- Parallelizing across layers (they're sequential with task-loss)
+# Run TFLE on MNIST (proven, 70%)
+python experiments/phase1_tuned.py
 
-**What DOES help (and should be implemented):**
-- K>1 within-layer proposals — same layer, pick best of K, GPU-parallel
-- CDLL local fitness — enables cross-layer parallelism
-- Cached prefix/suffix — only recompute the varying layer, not full model
+# Run full system (CDLL + SWT + SearchParallelEngine)
+python experiments/full_system.py
 
-**Expected GPU utilization by model size:**
-- 500K params: ~5-10%
-- 1.5M params: ~20-40%
-- 10M+ params: ~60-80%
-- 2.4B params (NOVA): ~90%+ (this is the target scale)
+# Run on server (vast.ai)
+python nova10m_pretrain.py  # or resume_4gpu.py for multi-GPU
+```
 
-**Multi-GPU:** Use config.yaml to assign different experiments to different GPUs.
-Each GPU runs its experiment list sequentially. Both GPUs run in parallel.
-Use CUDA_VISIBLE_DEVICES or the --gpu flag.
+## Architecture
 
-## Current State
+```
+NOVA-10M (74.5M params):
+  12 layers: 9 Mamba + 3 Attention (MMMA MMMA MMM A)
+  Hidden: 640, Vocab: 32K
+  MoLoRA: 5 experts (math, code, planning, self_eval, tool_use), top-2
+  All linear layers: BitLinear (ternary via absmean quantization)
+  Activation: ReLU + LayerNorm (NOT ReLU² — that's for full 2.4B only)
 
-**Fitness function:** Task-loss (cross-entropy). The original contrastive fitness
-was broken (10.31% on MNIST = random chance). Task-loss gave first-ever convergence
-to 23.54% at 20K steps. Tuned cosine temperature + 100K steps running now.
+NOVA-2.4B (target):
+  32 layers: 24 Mamba + 8 Attention
+  Hidden: 2560, Vocab: 128,256
+  Same MoLoRA, BitLinear, ReLU² activation
+```
 
-**Key files:**
-- `tfle/layers.py` — Core algorithm. `train_step()` is the main loop.
-- `tfle/model.py` — Composes layers. `train_step()` passes task_loss_fn to layers.
-- `tfle/config.py` — All 70+ parameters. FitnessType.TASK_LOSS is the fix.
-- `tfle/training.py` — Training loop. Moves data to model device (GPU).
-- `server/launch.py` — Config-driven multi-GPU launcher.
-- `server/config.yaml` — Experiment definitions.
+## Fitness Function (Use This Always)
 
-**What's broken:**
-- `transformer.py` line ~223: uses torch.randn() instead of actual activations
-- `fitness.py` has unused fitness functions (predictive, hybrid) — not wired in
+```python
+fitness = 0.85 * task_loss_delta + 0.15 * cdll_score
+```
 
-## Hyperparameter Findings
+- task_loss_delta = change in cross-entropy after flip (full model forward pass)
+- cdll_score = compression metric (entropy + MI + class separation)
+- Keep LayerNorm after every ReLU
+- Local heads are monitoring only — don't use in fitness
 
-| Parameter | Bad | Good | Why |
-|-----------|-----|------|-----|
-| Start temp | 0.5 | 0.10-0.20 | Too high = accept bad flips, too low = 0% acceptance |
-| Temp schedule | exponential 0.9999 | cosine | Exponential barely decays in 100K steps |
-| Flip rate | — | 0.01-0.03 | Lower for deeper layers (depth scaling) |
-| Batch size | 64 | 512 | Larger = more stable loss estimate per forward pass |
-| Reheat | off | on (window=3000, factor=2.5) | Escape local optima |
+## DO NOT Touch
 
-## Architecture Notes
+- Ternary constraint ({-1, 0, +1})
+- Trace system (success_traces, error_traces, selection formula)
+- Annealing schedule (cosine with reheat)
+- Accept/reject Boltzmann logic
+- LayerNorm placement
+- Best config values (cdll_w: 0.05, temp: 0.2, flip: 0.02, decay: 0.95, K: 128)
 
-- `[784, 256, 10]` — MNIST proof of concept (~200K params)
-- `[784, 512, 256, 10]` — MNIST with more capacity (~530K params)
-- `[3072, 512, 256, 10]` — CIFAR-10 (~1.7M params)
-- All use ReLU activation (not ReLU² — that's for the full NOVA model)
+## Benchmark Targets (2.4B)
 
-## Related Projects
+| Benchmark | Target | Rationale |
+|-----------|--------|-----------|
+| MATH-500 | 90%+ | DeepSeek-R1-Distill-1.5B hit 83.9% with less |
+| GSM8K | 95%+ | Distillation + GRPO + 16-sample voting |
+| HumanEval+ | 75%+ | Execution verify + retry |
+| AIME 2024 | 45%+ | Tree search with ternary cost advantage |
+| MMLU | 60-65% | Limited by training data (200B tokens) |
 
-- `~/Projects/nova/` — The full NOVA model (2.4B params, hybrid Transformer-Mamba)
-- This repo is the training algorithm. NOVA is the model it trains.
+## File Structure
+
+```
+tfle/               — Core TFLE algorithm (PyTorch)
+  tfle/             — layers, model, config, cdll, swt, local_heads, gpu_engine
+  tests/            — 14 test files, 124+ tests
+  experiments/      — MNIST, CIFAR, full system experiments
+  server/           — vast.ai training scripts
+  docs/             — specs and outlines
+
+nova/               — Full NOVA system
+  model_pt/         — PyTorch model (bitlinear, mamba, attention, hybrid, molora)
+  training_pt/      — Training (tfle, cdll, swt, pretrain, distill, grpo, curiosity, competence)
+  cuda/             — Custom CUDA kernels (ternary_matmul, absmax_quantize, trace_update)
+```
+
+## Git
+
+- Repo: github.com/joe51111jwd/tfle
+- Author: james camarota <atwbusinessjames@gmail.com>
+- Always commit with meaningful messages explaining WHY
+- Never commit credentials or API keys
+
+## Server Access (vast.ai)
+
+Instances change. Check the latest SSH string with the user. Previous instances:
+- 2x 5090: ssh -p 53502 root@108.255.76.60 (may be expired)
+- 4x 5090: ssh -p 18807 root@ssh9.vast.ai (may be expired)
+- Always use: `-i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no`
+
+## Priority Order (What To Do Next)
+
+1. Fix STE→TFLE handoff (flip_rate=0.001, no Boltzmann on regressions)
+2. Test TFLE on language (NOVA-10M on WikiText — the make-or-break experiment)
+3. Phase 2: Reasoning distillation on pretrained NOVA-10M
+4. Phase 3: Dr. GRPO with binary rewards
+5. Fix overfitting (more data or regularization)
+6. Scale to 2.4B (only after all above pass)
