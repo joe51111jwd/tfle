@@ -35,13 +35,48 @@ class GRPOConfig:
     clip_ratio: float = 10.0
     lr: float = 3e-6
     weight_decay: float = 0.01
-    num_steps: int = 200
+    num_steps: int = 5000
     batch_size: int = 4
     temperature: float = 1.0
     max_response_len: int = 200
     max_seq_len: int = 4096
     eval_every: int = 25
     grad_clip: float = 1.0
+    early_stopping_metric: str = "gsm8k_accuracy"
+    early_stopping_patience: int = 500
+    min_steps: int = 3000
+
+
+class EarlyStopper:
+    """Tracks a metric and signals when training should stop.
+
+    Stops if the tracked metric shows no improvement for `patience` steps,
+    but never before `min_steps` have elapsed.
+    """
+
+    def __init__(self, patience: int = 500, min_steps: int = 3000):
+        self.patience = patience
+        self.min_steps = min_steps
+        self.best_value: float = float("-inf")
+        self.best_step: int = 0
+        self.current_step: int = 0
+
+    def update(self, value: float, step: int) -> bool:
+        """Update with a new metric value. Returns True if training should stop."""
+        self.current_step = step
+        if value > self.best_value:
+            self.best_value = value
+            self.best_step = step
+        if step < self.min_steps:
+            return False
+        return (step - self.best_step) >= self.patience
+
+    def status(self) -> dict:
+        return {
+            "best_value": self.best_value,
+            "best_step": self.best_step,
+            "steps_since_best": self.current_step - self.best_step,
+        }
 
 
 # ── Dataset loaders ───────────────────────────────────────────
@@ -337,11 +372,30 @@ class GRPOTrainer:
         }
 
     def train(self, questions: list[dict] | None = None) -> dict:
-        """Run full GRPO training loop."""
+        """Run full GRPO training loop with early stopping.
+
+        Runs for up to num_steps, but stops early if the tracked metric
+        (default: accuracy as proxy for gsm8k_accuracy) shows no improvement
+        for early_stopping_patience steps, provided min_steps have passed.
+        """
         if questions is None:
             questions = load_grpo_questions()
 
+        stopper = EarlyStopper(
+            patience=self.config.early_stopping_patience,
+            min_steps=self.config.min_steps,
+        )
+
+        # map config metric name to the key in train_step output
+        metric_key_map = {
+            "gsm8k_accuracy": "accuracy",
+            "accuracy": "accuracy",
+            "mean_reward": "mean_reward",
+        }
+        metric_key = metric_key_map.get(self.config.early_stopping_metric, "accuracy")
+
         results = {"config": vars(self.config), "steps": []}
+        metrics = {}
 
         for step in range(self.config.num_steps):
             batch_qs = random.sample(questions, min(self.config.batch_size, len(questions)))
@@ -357,5 +411,18 @@ class GRPOTrainer:
                 )
                 results["steps"].append({"step": step, **metrics})
 
-        results["final_reward"] = metrics["mean_reward"]
+                tracked_value = metrics.get(metric_key, 0.0)
+                should_stop = stopper.update(tracked_value, step)
+                if should_stop:
+                    logger.info(
+                        f"Early stopping at step {step}: no improvement in "
+                        f"{self.config.early_stopping_metric} for "
+                        f"{self.config.early_stopping_patience} steps "
+                        f"(best={stopper.best_value:.4f} at step {stopper.best_step})"
+                    )
+                    break
+
+        results["final_reward"] = metrics.get("mean_reward", 0.0)
+        results["early_stopping"] = stopper.status()
+        results["total_steps"] = step + 1 if metrics else 0
         return results

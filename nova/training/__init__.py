@@ -7,6 +7,7 @@ Modules:
   block_local_tfle - Block-local TFLE (key innovation)
   tfle_grpo        - TFLE-GRPO integration
   swt              - Sleep-wake training for continual learning
+  pretrain_stages  - 3-stage pretraining (synthetic, filtered, cooldown)
 """
 
 # Lazy imports to avoid circular deps and missing optional modules
@@ -16,11 +17,21 @@ except ImportError:
     pass
 
 try:
-    from .data_loader import PretrainDataLoader
+    from .data_loader import PretrainDataLoader, FilteredPretrainDataLoader
 except ImportError:
     pass
 
 try:
     from .checkpoint import CheckpointManager, CheckpointState
+except ImportError:
+    pass
+
+try:
+    from .pretrain_stages import (
+        SyntheticCurriculumLoader,
+        PerplexityFilter,
+        STEStabilityMonitor,
+        get_stage_config,
+    )
 except ImportError:
     pass

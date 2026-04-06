@@ -28,11 +28,13 @@ logger = logging.getLogger(__name__)
 @dataclass
 class BlockLocalConfig:
     block_size: int = 64
-    K: int = 512
+    K: int = 128
     flip_rate: float = 0.05
     re_eval_tolerance: float = 0.005
+    use_fisher: bool = True
+    fisher_multiplier: float = 3.0
     fisher_refresh_every: int = 1000
-    fisher_boost_factor: float = 3.0
+    layer_wise_cycling: bool = True
     embed_lr: float = 1e-5
     embed_weight_decay: float = 0.01
 
@@ -123,16 +125,21 @@ class BlockLocalTFLE:
         """Select next block using Fisher-weighted priority with cycling."""
         n_blocks = len(self.blocks)
 
-        # simple cycling with Fisher boost:
-        # high-Fisher blocks appear multiple times in the schedule
         if self._block_cursor >= n_blocks:
             self._block_cursor = 0
 
-        # every cycle, sort by Fisher and boost top blocks
+        if not self.config.use_fisher:
+            # uniform cycling without Fisher weighting
+            if self.config.layer_wise_cycling:
+                block_idx = self._block_cursor
+                self._block_cursor += 1
+                return block_idx
+            return torch.randint(n_blocks, (1,), device=self.device).item()
+
+        # Fisher-weighted selection: high-Fisher blocks get fisher_multiplier boost
         priorities = self.fisher_scores.clone()
         mean_fisher = priorities.mean()
 
-        # blocks with above-average Fisher get boosted probability
         if priorities.std() > 1e-8:
             probs = F.softmax(priorities / mean_fisher.clamp(min=1e-8), dim=0)
         else:
@@ -206,7 +213,10 @@ class BlockLocalTFLE:
 
         Fisher = E[grad_w log p(y|x)]^2 for each weight.
         Aggregated per block as mean Fisher of that block's weights.
+        Skipped when use_fisher is False.
         """
+        if not self.config.use_fisher:
+            return
         self.model.eval()
         fisher_accum = {name: torch.zeros_like(m.weight) for name, m in self.bitlinear_layers}
 

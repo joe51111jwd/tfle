@@ -9,14 +9,19 @@ Supports:
   - Gradient checkpointing (toggle)
   - Streaming FineWeb-Edu + StarCoder data
   - Time-based checkpointing for spot instance safety
+  - 3-stage pretraining (--stage 1|2|3)
 
 Launch:
-  torchrun --nproc_per_node=8 nova/training/pretrain.py   # DDP
-  python nova/training/pretrain.py                         # DataParallel
+  torchrun --nproc_per_node=8 nova/training/pretrain.py                # DDP (legacy)
+  python nova/training/pretrain.py                                      # DataParallel (legacy)
+  python nova/training/pretrain.py --stage 1 --data_dir ./curriculum    # Stage 1
+  python nova/training/pretrain.py --stage 2                            # Stage 2
+  python nova/training/pretrain.py --stage 3                            # Stage 3
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import json
@@ -38,9 +43,15 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from nova.model import Nova2_4B, NOVA_2_4B
 from nova.model.config import NovaConfig
-from nova.training.data_loader import PretrainDataLoader
+from nova.training.data_loader import PretrainDataLoader, FilteredPretrainDataLoader
 from nova.training.checkpoint import CheckpointManager, CheckpointState
 from nova.training.tokenizer_setup import VOCAB_SIZE
+from nova.training.pretrain_stages import (
+    get_stage_config,
+    SyntheticCurriculumLoader,
+    PerplexityFilter,
+    STEStabilityMonitor,
+)
 
 # ── Defaults ──────────────────────────────────────────────
 
@@ -406,5 +417,297 @@ def train(cfg: dict | None = None):
         dist.destroy_process_group()
 
 
+# ── Staged Training Loop ─────────────────────────────────
+
+def train_staged(stage: int, data_dir: str | None = None, cfg_overrides: dict | None = None):
+    """3-stage pretraining entry point.
+
+    Stage 1: Synthetic curriculum (JSONL files, short seqs, fast warmup)
+    Stage 2: Hard-only real data (perplexity filtering, re-score every 50K steps)
+    Stage 3: Unfiltered real data cooldown (lower LR)
+    """
+    stage_cfg = get_stage_config(stage)
+    cfg = {**DEFAULTS, **stage_cfg, **(cfg_overrides or {})}
+    grad_accum = cfg.pop("gradient_accumulation", 1)
+    ppl_rescore_every = cfg.pop("ppl_rescore_every", 50_000)
+
+    # Setup device and distributed
+    if is_ddp():
+        device = setup_ddp()
+    else:
+        device = setup_dp()
+
+    log(f"\n{SEP}")
+    log(f"NOVA 2.4B STE PRETRAINING — STAGE {stage}")
+    log(f"  {cfg.get('description', '')}")
+    log(f"{SEP}\n")
+    log(f"  Config: {json.dumps({k: v for k, v in cfg.items() if k != 'description'}, indent=2)}")
+    log(f"  Gradient accumulation: {grad_accum}")
+
+    # Build model
+    model = build_model(device, cfg["gradient_checkpointing"])
+    model = wrap_model(model, device)
+    raw_model = get_raw_model(model)
+
+    # Optimizer
+    optimizer = build_optimizer(model, cfg)
+    scaler = torch.amp.GradScaler("cuda")
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda step: 1.0)
+
+    # Stability monitor
+    stability = STEStabilityMonitor()
+
+    # Checkpoint manager
+    ckpt_mgr = CheckpointManager(
+        save_dir=CKPT_DIR,
+        save_every_minutes=cfg["save_every_minutes"],
+    )
+
+    # Resume if checkpoint exists
+    start_step = 0
+    tokens_seen = 0
+    best_val_loss = float("inf")
+
+    state = ckpt_mgr.resume(model, optimizer, scheduler, scaler, device=device)
+    if state is not None:
+        start_step = state.step
+        tokens_seen = state.tokens_seen
+        best_val_loss = state.best_val_loss
+        log(f"  Resumed at step {start_step}, {tokens_seen:,} tokens, best_val={best_val_loss:.4f}")
+
+    # Build data loader per stage
+    if stage == 1:
+        if data_dir is None:
+            data_dir = str(PROJECT_ROOT / "data" / "curriculum")
+        loader = SyntheticCurriculumLoader(
+            data_dir=data_dir,
+            seq_len=cfg["seq_len"],
+            batch_size=cfg["batch_size"],
+            seed=42 + get_rank(),
+        )
+        log(f"  Stage 1: Synthetic curriculum from {data_dir}")
+    elif stage == 2:
+        loader = FilteredPretrainDataLoader(
+            model=raw_model,
+            device=device,
+            seq_len=cfg["seq_len"],
+            batch_size=cfg["batch_size"],
+            buffer_size=cfg["buffer_size"],
+            seed=42 + get_rank(),
+        )
+        log("  Stage 2: Scoring corpus for perplexity filtering...")
+        threshold = loader.initial_score(max_docs=10_000)
+        log(f"  PPL threshold: {threshold:.2f}")
+    else:
+        loader = PretrainDataLoader(
+            seq_len=cfg["seq_len"],
+            batch_size=cfg["batch_size"],
+            buffer_size=cfg["buffer_size"],
+            seed=42 + get_rank(),
+        )
+        log("  Stage 3: Unfiltered data cooldown")
+
+    # Logging dirs
+    CKPT_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Training
+    model.train()
+    running_loss = 0.0
+    t0 = time.time()
+    step = start_step
+    accum_step = 0
+
+    log(f"\n{SEP}")
+    log(f"Training from step {start_step} to {cfg['total_steps']}")
+    log(f"{SEP}\n")
+
+    optimizer.zero_grad(set_to_none=True)
+
+    for batch in loader.stream():
+        if step >= cfg["total_steps"]:
+            break
+
+        input_ids = batch["input_ids"].to(device)
+        labels = batch["labels"].to(device)
+        batch_tokens = input_ids.numel()
+
+        # Forward
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+            logits = model(input_ids)
+            loss = F.cross_entropy(
+                logits.reshape(-1, VOCAB_SIZE),
+                labels.reshape(-1),
+                ignore_index=-100,
+            )
+            loss = loss / grad_accum  # scale for accumulation
+
+        scaler.scale(loss).backward()
+        accum_step += 1
+        tokens_seen += batch_tokens * get_world_size()
+        running_loss += loss.item() * grad_accum  # unscale for logging
+
+        # Only step optimizer every grad_accum mini-batches
+        if accum_step < grad_accum:
+            continue
+        accum_step = 0
+
+        # LR schedule
+        current_lr = get_lr(step, cfg["warmup_steps"], cfg["total_steps"],
+                            cfg["lr"], cfg["min_lr"])
+        set_lr(optimizer, current_lr)
+
+        # Unscale, clip, step
+        scaler.unscale_(optimizer)
+        grad_norm = nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip"])
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad(set_to_none=True)
+
+        step += 1
+
+        # Stability monitoring
+        stability.record_train_loss(running_loss / max(cfg["log_every"], 1) if step % cfg["log_every"] == 0 else loss.item() * grad_accum)
+        stability.record_grad_norm(grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm)
+
+        # Logging
+        if step % cfg["log_every"] == 0:
+            avg_loss = running_loss / cfg["log_every"]
+            elapsed = time.time() - t0
+            tps = tokens_seen / max(elapsed, 1)
+            gs = gpu_stats() if step % (cfg["log_every"] * 5) == 0 else ""
+
+            # Stability check
+            status = stability.check()
+            stability_str = ""
+            if status.state != "stable":
+                stability_str = f" | STABILITY: {status.state} ({status.reason})"
+                if status.state == "critical":
+                    reduced = stability.maybe_reduce_lr(optimizer, status)
+                    if reduced:
+                        stability_str += " | LR HALVED"
+
+            log(f"  Step {step:6d}/{cfg['total_steps']} | "
+                f"Loss {loss.item() * grad_accum:.4f} | Avg {avg_loss:.4f} | "
+                f"LR {current_lr:.2e} | "
+                f"{tps:,.0f} tok/s | "
+                f"{tokens_seen/1e9:.2f}B tokens{stability_str} {gs}")
+            running_loss = 0.0
+
+        # Eval
+        if step % cfg["eval_every"] == 0 and is_main_process():
+            val_loss = evaluate(model, device, cfg)
+            improved = val_loss < best_val_loss
+            best_val_loss = min(best_val_loss, val_loss)
+            stability.record_val_loss(val_loss)
+            log(f"  EVAL step {step}: val_loss={val_loss:.4f} "
+                f"best={best_val_loss:.4f} {'(new best)' if improved else ''}")
+
+        # Stage 2: periodic re-scoring
+        if (stage == 2
+                and step > 0
+                and step % ppl_rescore_every == 0
+                and is_main_process()
+                and isinstance(loader, FilteredPretrainDataLoader)):
+            log(f"  Re-scoring corpus at step {step}...")
+            new_threshold = loader.rescore(max_docs=10_000)
+            stats = loader.filter_stats
+            log(f"  New PPL threshold: {new_threshold:.2f} | "
+                f"Accept rate: {stats['accept_rate']:.1%}")
+
+        # Time-based checkpoint
+        if ckpt_mgr.should_save() and is_main_process():
+            ckpt_state = CheckpointState(
+                step=step,
+                tokens_seen=tokens_seen,
+                best_val_loss=best_val_loss,
+                config=cfg,
+            )
+            ckpt_mgr.save(model, optimizer, scheduler, scaler, ckpt_state)
+
+    # Final checkpoint
+    if is_main_process():
+        ckpt_state = CheckpointState(
+            step=step,
+            tokens_seen=tokens_seen,
+            best_val_loss=best_val_loss,
+            config=cfg,
+        )
+        final_path = ckpt_mgr.save(model, optimizer, scheduler, scaler, ckpt_state)
+
+        elapsed = time.time() - t0
+        text_r, code_r = loader.get_ratio()
+        summary = {
+            "stage": stage,
+            "steps": step,
+            "tokens_seen": tokens_seen,
+            "best_val_loss": best_val_loss,
+            "time_hours": elapsed / 3600,
+            "text_ratio": text_r,
+            "code_ratio": code_r,
+            "lr_reductions": stability.lr_reductions,
+            "final_checkpoint": str(final_path),
+        }
+        with open(LOG_DIR / f"pretrain_stage{stage}_summary.json", "w") as f:
+            json.dump(summary, f, indent=2)
+
+        log(f"\n{SEP}")
+        log(f"STAGE {stage} DONE: {step} steps | {tokens_seen/1e9:.2f}B tokens | "
+            f"best_val={best_val_loss:.4f} | {elapsed/3600:.1f}h")
+        log(f"Text/Code: {text_r:.0%}/{code_r:.0%}")
+        log(f"LR reductions from instability: {stability.lr_reductions}")
+        log(f"Checkpoint: {final_path}")
+        log(f"{SEP}")
+
+    if is_ddp():
+        dist.destroy_process_group()
+
+
+# ── CLI ──────────────────────────────────────────────────
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="NOVA 2.4B pretraining")
+    parser.add_argument(
+        "--stage", type=int, default=None, choices=[1, 2, 3],
+        help="Pretraining stage (1=synthetic, 2=hard-filtered, 3=unfiltered cooldown). "
+             "Omit for legacy single-stage training.",
+    )
+    parser.add_argument(
+        "--data_dir", type=str, default=None,
+        help="Directory with JSONL files for Stage 1 synthetic curriculum.",
+    )
+    parser.add_argument(
+        "--total_steps", type=int, default=None,
+        help="Override total training steps.",
+    )
+    parser.add_argument(
+        "--lr", type=float, default=None,
+        help="Override learning rate.",
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=None,
+        help="Override batch size.",
+    )
+    parser.add_argument(
+        "--seq_len", type=int, default=None,
+        help="Override sequence length.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    train()
+    args = parse_args()
+
+    if args.stage is not None:
+        overrides = {}
+        for key in ("total_steps", "lr", "batch_size", "seq_len"):
+            val = getattr(args, key, None)
+            if val is not None:
+                overrides[key] = val
+        train_staged(
+            stage=args.stage,
+            data_dir=args.data_dir,
+            cfg_overrides=overrides or None,
+        )
+    else:
+        train()
