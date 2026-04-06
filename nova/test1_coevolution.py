@@ -404,12 +404,12 @@ def main():
     embed_optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
         lr=5e-5, weight_decay=0.01)
-    embed_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(embed_optimizer, T_max=5000, eta_min=1e-6)
+    embed_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(embed_optimizer, T_max=2000, eta_min=1e-6)
 
     tfle_config = {"K": 32, "flip_rate": 0.001, "re_eval_tolerance": 0.05}
 
     val_iter = iter(val_dl)
-    for step in range(3000, 8000):
+    for step in range(3000, 5000):
         model.train()
         try:
             x, y = next(train_iter)
@@ -484,9 +484,9 @@ def main():
     embed_optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
         lr=1e-5, weight_decay=0.01)
-    embed_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(embed_optimizer, T_max=6000, eta_min=1e-6)
+    embed_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(embed_optimizer, T_max=3000, eta_min=1e-6)
 
-    for step in range(8000, 14000):
+    for step in range(5000, 8000):
         try:
             x, y = next(train_iter)
         except StopIteration:
@@ -499,11 +499,11 @@ def main():
             vx, vy = next(val_iter)
         x, y = x.to(DEVICE), y.to(DEVICE)
 
-        layer_idx = (step - 8000) % len(attn_layers)
+        layer_idx = (step - 5000) % len(attn_layers)
         _, layer_module, _ = attn_layers[layer_idx]
 
         # Cosine tolerance decay
-        progress = (step - 8000) / 6000
+        progress = (step - 5000) / 3000
         tolerance = 0.05 * (1 + math.cos(math.pi * progress)) / 2 + 0.01
         tfle_config["re_eval_tolerance"] = tolerance
 
@@ -559,7 +559,7 @@ def main():
     mamba_layers = get_bitlinear_layers(raw_model, "mamba_only")
     print(f"  {len(all_layers)} total BitLinear layers ({len(attn_layers)} attn + {len(mamba_layers)} mamba)")
 
-    for step in range(14000, 25000):
+    for step in range(8000, 12000):
         try:
             x, y = next(train_iter)
         except StopIteration:
@@ -572,7 +572,7 @@ def main():
             vx, vy = next(val_iter)
         x, y = x.to(DEVICE), y.to(DEVICE)
 
-        layer_idx = (step - 14000) % len(all_layers)
+        layer_idx = (step - 8000) % len(all_layers)
         layer_name, layer_module, layer_type = all_layers[layer_idx]
 
         # Different configs for attn vs mamba

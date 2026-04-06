@@ -88,7 +88,7 @@ def main():
     cfg = {
         "lr": 1e-4, "scheduler": "cosine", "weight_decay": 0.01,
         "grad_clip": 1.0, "batch_size": 16, "seq_len": 256,
-        "eval_every": 500, "checkpoint_every": 5000, "total_steps": 50000,
+        "eval_every": 500, "checkpoint_every": 5000, "total_steps": 15000,
     }
     print(f"Config: {json.dumps(cfg, indent=2)}\n")
 
