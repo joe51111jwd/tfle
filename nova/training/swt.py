@@ -20,6 +20,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .block_local_tfle import BlockLocalTFLE, BlockLocalConfig
+from .self_dpo import SelfDPO
+from .preference_store import PreferenceStore
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +186,7 @@ class SleepWakeTrainer:
         model: nn.Module,
         config: SWTConfig,
         device: torch.device,
+        preference_store: PreferenceStore | None = None,
     ):
         self.model = model
         self.config = config
@@ -212,6 +215,14 @@ class SleepWakeTrainer:
             ewc_lambda=config.ewc_lambda,
             device=device,
         )
+
+        # Self-DPO (uses preference pairs from inference)
+        self.preference_store = preference_store
+        self.self_dpo = SelfDPO(
+            model=model,
+            preference_store=preference_store or PreferenceStore(),
+            device=device,
+        ) if preference_store is not None else None
 
         self.task_count = 0
         self.wake_steps = 0
@@ -253,23 +264,89 @@ class SleepWakeTrainer:
         metrics["replay_size"] = len(self.replay)
         return metrics
 
+    def _spot_check(self, vocab_size: int) -> float:
+        """Run spot-check on replay buffer samples to measure accuracy.
+
+        Uses 15 replay samples (proxy for 10 math + 5 code) to estimate
+        whether the model degraded. Returns the average fitness score.
+        """
+        self.model.eval()
+        n_checks = 15
+        total_fitness = 0.0
+        checked = 0
+
+        for _ in range(n_checks):
+            batch = self.replay.sample(batch_size=1)
+            if batch is None:
+                break
+            x, y = batch
+            fitness = self.tfle._evaluate_fitness(x, y, vocab_size)
+            total_fitness += fitness
+            checked += 1
+
+        return total_fitness / max(checked, 1)
+
     def sleep_phase(
         self,
         vocab_size: int,
         dataloader=None,
     ) -> list[dict]:
-        """Sleep phase: consolidation on replay buffer with EWC.
+        """Sleep phase: three-step consolidation.
 
-        1. Snapshot EWC (Fisher + reference weights)
-        2. Train on replay buffer with CDLL-augmented fitness
-        3. EWC penalty prevents forgetting
+        1. Memory consolidation (EWC + replay buffer)
+        2. Self-DPO training (if sufficient preference pairs)
+        3. TFLE refinement on replay buffer with EWC penalty
+
+        After Self-DPO, a spot-check runs: if accuracy drops >5%,
+        EWC lambda is increased to protect existing knowledge.
         """
-        # snapshot for EWC if we have a dataloader
-        if dataloader is not None:
-            self.ewc.snapshot(dataloader, vocab_size)
-
         metrics_list = []
 
+        # ── Step 1: Memory consolidation (EWC snapshot) ──
+        if dataloader is not None:
+            self.ewc.snapshot(dataloader, vocab_size)
+        logger.info("Sleep step 1: EWC snapshot complete")
+
+        # measure pre-DPO fitness for spot-check comparison
+        pre_dpo_fitness = self._spot_check(vocab_size)
+
+        # ── Step 2: Self-DPO training ──
+        dpo_result = None
+        if self.self_dpo is not None and self.self_dpo.should_train():
+            logger.info("Sleep step 2: Running Self-DPO training")
+            dpo_result = self.self_dpo.train(
+                num_epochs=1, batch_size=4, lr=5e-6,
+            )
+            metrics_list.append({
+                "phase": "sleep_dpo",
+                "dpo_result": dpo_result,
+            })
+
+            # spot-check: did DPO hurt accuracy?
+            post_dpo_fitness = self._spot_check(vocab_size)
+            fitness_drop = pre_dpo_fitness - post_dpo_fitness
+            relative_drop = abs(fitness_drop / min(pre_dpo_fitness, -1e-8))
+
+            if relative_drop > 0.05:
+                old_lambda = self.ewc.ewc_lambda
+                self.ewc.ewc_lambda *= 1.5
+                logger.warning(
+                    f"Spot-check: fitness dropped {relative_drop:.1%} after DPO. "
+                    f"Increasing EWC lambda {old_lambda:.0f} -> {self.ewc.ewc_lambda:.0f}"
+                )
+                # re-snapshot with stronger lambda
+                if dataloader is not None:
+                    self.ewc.snapshot(dataloader, vocab_size)
+            else:
+                logger.info(
+                    f"Spot-check passed: fitness change {fitness_drop:.4f} "
+                    f"({relative_drop:.1%})"
+                )
+        else:
+            logger.info("Sleep step 2: Self-DPO skipped (insufficient pairs)")
+
+        # ── Step 3: TFLE refinement on replay buffer with EWC ──
+        logger.info("Sleep step 3: TFLE refinement with EWC penalty")
         for step in range(self.config.sleep_steps):
             batch = self.replay.sample(batch_size=32)
             if batch is None:
@@ -324,7 +401,7 @@ class SleepWakeTrainer:
 
             self.sleep_steps += 1
             metrics_list.append({
-                "phase": "sleep",
+                "phase": "sleep_tfle",
                 "step": step,
                 "accepted": accepted,
                 "block_idx": block_idx,
@@ -390,10 +467,11 @@ class SleepWakeTrainer:
                     "steps": outcome,
                 })
                 if step % log_every == 0:
-                    n_accepted = sum(1 for m in outcome if m["accepted"])
+                    tfle_steps = [m for m in outcome if m.get("phase") == "sleep_tfle"]
+                    n_accepted = sum(1 for m in tfle_steps if m.get("accepted"))
                     logger.info(
                         f"Sleep phase at task {self.task_count}: "
-                        f"{n_accepted}/{len(outcome)} accepted"
+                        f"{n_accepted}/{len(tfle_steps)} TFLE accepted"
                     )
             else:
                 if step % log_every == 0:

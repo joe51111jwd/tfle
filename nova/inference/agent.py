@@ -1,8 +1,9 @@
 """NOVA agent loop — task parsing, planning, execution, and learning.
 
 Integrates all inference strategies via DifficultyRouter and manages
-the full reason-act-verify cycle. Handles SWT wake updates when the
-model encounters novel task patterns.
+the full reason-act-verify cycle. Bracket inference is the DEFAULT
+method for all tasks. Handles SWT wake updates when the model
+encounters novel task patterns.
 """
 
 from __future__ import annotations
@@ -28,6 +29,19 @@ from .strategies import (
     TreeSearch,
     extract_answer,
 )
+from .bracket import BracketInference
+from .tool_orchestrator import ToolOrchestrator
+
+
+# ── Bracket sizing by difficulty ──────────────────────────────
+
+BRACKET_SIZES: dict[str, int] = {
+    "trivial": 1,
+    "easy": 4,
+    "simple": 4,      # alias — router uses "simple"
+    "medium": 16,
+    "hard": 64,
+}
 
 
 # ── Task types ─────────────────────────────────────────────────
@@ -37,6 +51,7 @@ class TaskType(Enum):
     MATH = "math"
     CODE = "code"
     REASONING = "reasoning"
+    KNOWLEDGE = "knowledge"
     GENERAL = "general"
 
 
@@ -167,17 +182,27 @@ REASONING_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+KNOWLEDGE_PATTERNS = re.compile(
+    r"\b(who\s+is|who\s+was|what\s+year|when\s+did|when\s+was|"
+    r"capital\s+of|president\s+of|population\s+of|"
+    r"current|latest|founded\s+in|born\s+in|died\s+in|"
+    r"where\s+is|where\s+was|stock\s+price|exchange\s+rate)\b",
+    re.IGNORECASE,
+)
+
 
 def parse_task_type(prompt: str) -> TaskType:
     """Classify the task type from the prompt text."""
     math_hits = len(MATH_PATTERNS.findall(prompt))
     code_hits = len(CODE_PATTERNS.findall(prompt))
     reasoning_hits = len(REASONING_PATTERNS.findall(prompt))
+    knowledge_hits = len(KNOWLEDGE_PATTERNS.findall(prompt))
 
     scores = {
         TaskType.MATH: math_hits * 2,
         TaskType.CODE: code_hits * 2,
         TaskType.REASONING: reasoning_hits,
+        TaskType.KNOWLEDGE: knowledge_hits * 2,
         TaskType.GENERAL: 1,
     }
 
@@ -214,6 +239,11 @@ def select_strategy(
             "simple": "direct",
             "medium": "self_consistency",
             "hard": "adversarial_review",
+        },
+        TaskType.KNOWLEDGE: {
+            "simple": "direct",
+            "medium": "self_consistency",
+            "hard": "self_consistency",
         },
         TaskType.GENERAL: {
             "simple": "direct",
@@ -296,11 +326,15 @@ class NOVAAgent:
         tokenizer: Tokenizer,
         swt_scheduler=None,
         swt_novel_threshold: int | None = None,
+        preference_store: Any | None = None,
+        search_enabled: bool = False,
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.swt_scheduler = swt_scheduler
         self.swt_novel_threshold = swt_novel_threshold or self.SWT_NOVEL_THRESHOLD
+        self.preference_store = preference_store
+        self.search_enabled = search_enabled
 
         self.short_memory = ShortTermMemory()
         self.long_memory = LongTermMemory()
@@ -323,6 +357,14 @@ class NOVAAgent:
             difficulty_router=self.router,
         )
 
+        # Bracket inference — default method for all tasks
+        self.bracket = BracketInference(
+            model, tokenizer, preference_store=preference_store
+        )
+
+        # Tool orchestrator — web search integration
+        self.tool_orchestrator = ToolOrchestrator()
+
         self.strategies = {
             "direct": None,  # handled by Environment._direct_generate
             "self_consistency": self.voter,
@@ -336,8 +378,16 @@ class NOVAAgent:
 
         self.env = Environment(model, tokenizer, self.strategies)
 
-    def run(self, prompt: str, ground_truth: str | None = None) -> dict:
+    def run(
+        self,
+        prompt: str,
+        ground_truth: str | None = None,
+        use_bracket: bool = True,
+    ) -> dict:
         """Full agent cycle for a single prompt.
+
+        By default routes through bracket inference. Set use_bracket=False
+        to fall back to the legacy strategy-only path.
 
         Returns dict with answer, task_type, difficulty, strategy, timing, success.
         """
@@ -352,11 +402,16 @@ class NOVAAgent:
         difficulty = difficulty_info[0]
         entropy = difficulty_info[1]
 
-        # 3. Plan — select strategy
+        # 3. Plan — select strategy (used as fallback or inside bracket)
         strategy_name = select_strategy(task_type, difficulty, self.long_memory)
 
-        # 4. Execute
-        result = self.env.execute(prompt, strategy_name)
+        # 4. Execute — bracket is the default path
+        if use_bracket:
+            result = self._bracket_dispatch(prompt, task_type, difficulty)
+            strategy_name = result.get("strategy", f"bracket_{task_type.value}")
+        else:
+            result = self.env.execute(prompt, strategy_name)
+
         answer = result.get("answer")
         elapsed = time.time() - t0
 
@@ -393,11 +448,47 @@ class NOVAAgent:
             "result_detail": result,
         }
 
-    def run_batch(self, prompts: list[str], ground_truths: list[str | None] | None = None) -> list[dict]:
+    def _bracket_dispatch(
+        self, prompt: str, task_type: TaskType, difficulty: str
+    ) -> dict:
+        """Route prompt through bracket inference based on task type.
+
+        Routing logic:
+          - CODE: bracket.code_bracket with execution verification
+          - MATH: bracket with answer verification
+          - KNOWLEDGE (search enabled): search first, then bracket augmented prompt
+          - Everything else: pure bracket inference
+        """
+        n_candidates = BRACKET_SIZES.get(difficulty, 16)
+
+        if task_type == TaskType.CODE:
+            return self.bracket.code_bracket(prompt, n_candidates=n_candidates)
+
+        if task_type == TaskType.MATH:
+            return self.bracket.run(
+                prompt, n_candidates=n_candidates, verify_answers=True
+            )
+
+        if task_type == TaskType.KNOWLEDGE and self.search_enabled:
+            augmented = self.tool_orchestrator.search_and_augment(prompt)
+            return self.bracket.run(augmented, n_candidates=n_candidates)
+
+        # REASONING, GENERAL, or KNOWLEDGE without search
+        return self.bracket.run(prompt, n_candidates=n_candidates)
+
+    def run_batch(
+        self,
+        prompts: list[str],
+        ground_truths: list[str | None] | None = None,
+        use_bracket: bool = True,
+    ) -> list[dict]:
         """Run the agent on a batch of prompts sequentially."""
         if ground_truths is None:
             ground_truths = [None] * len(prompts)
-        return [self.run(p, gt) for p, gt in zip(prompts, ground_truths)]
+        return [
+            self.run(p, gt, use_bracket=use_bracket)
+            for p, gt in zip(prompts, ground_truths)
+        ]
 
     def _verify(self, predicted: str, ground_truth: str) -> bool:
         """Check if predicted answer matches ground truth."""

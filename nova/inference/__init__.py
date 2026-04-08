@@ -1,4 +1,4 @@
-"""NOVA inference strategies, agent loop, and benchmark suite."""
+"""NOVA inference strategies, agent loop, bracket, and benchmark suite."""
 
 from .strategies import (
     ExecutionVerifier,
@@ -11,6 +11,7 @@ from .strategies import (
 )
 from .agent import NOVAAgent
 from .benchmark import BenchmarkRunner
+from .bracket import BracketInference
 
 __all__ = [
     "ExecutionVerifier",
@@ -22,4 +23,5 @@ __all__ = [
     "StrategyPipeline",
     "NOVAAgent",
     "BenchmarkRunner",
+    "BracketInference",
 ]

@@ -1,8 +1,10 @@
 """NOVA benchmark suite — load, run, score, and report.
 
-Supports two modes:
+Supports multiple modes:
   - base: raw model generation, no strategies
   - nova: full NOVA agent with all strategies enabled
+  - bracket: bracket inference (default in agent)
+  - bracket_search: bracket inference with search augmentation
 
 Ablation mode toggles each strategy individually to measure contribution.
 Results saved as JSON with per-question breakdown and summary table.
@@ -18,12 +20,46 @@ from typing import Any
 
 import torch
 
-from .agent import NOVAAgent, parse_task_type
+from .agent import NOVAAgent, parse_task_type, BRACKET_SIZES
 from .strategies import (
     GenerativeModel,
     Tokenizer,
     extract_answer,
 )
+from .bracket import BracketInference
+from .tool_orchestrator import ToolOrchestrator
+
+
+# ── Benchmark targets from the NOVA spec ─────────────────────
+
+
+BENCHMARK_TARGETS: dict[str, dict[str, float]] = {
+    "GSM8K": {
+        "low": 0.90,
+        "high": 0.97,
+        "description": "Grade school math — bracket + answer verification",
+    },
+    "MATH-500": {
+        "low": 0.55,
+        "high": 0.70,
+        "description": "Competition math — bracket + verification",
+    },
+    "MMLU": {
+        "low": 0.55,
+        "high": 0.63,
+        "description": "Massive multitask — bracket only",
+    },
+    "MMLU+search": {
+        "low": 0.70,
+        "high": 0.80,
+        "description": "MMLU with search augmentation",
+    },
+    "HumanEval": {
+        "low": 0.85,
+        "high": 0.95,
+        "description": "Code generation — bracket + execution verify",
+    },
+}
 
 
 # ── Benchmark definitions ─────────────────────────────────────
@@ -541,14 +577,319 @@ class BenchmarkRunner:
         # Aggregate scores
         base_scores = [r.score for r in results if r.mode == "base"]
         nova_scores = [r.score for r in results if r.mode == "nova"]
+        bracket_scores = [r.score for r in results if r.mode == "bracket"]
+        bracket_search_scores = [
+            r.score for r in results if r.mode == "bracket_search"
+        ]
         if base_scores:
-            print(f"\n  Base average:  {sum(base_scores) / len(base_scores):.1%}")
+            print(f"\n  Base average:     {sum(base_scores) / len(base_scores):.1%}")
         if nova_scores:
-            print(f"  NOVA average:  {sum(nova_scores) / len(nova_scores):.1%}")
+            print(f"  NOVA average:     {sum(nova_scores) / len(nova_scores):.1%}")
+        if bracket_scores:
+            print(f"  Bracket average:  {sum(bracket_scores) / len(bracket_scores):.1%}")
+        if bracket_search_scores:
+            print(
+                f"  Bracket+search:   "
+                f"{sum(bracket_search_scores) / len(bracket_search_scores):.1%}"
+            )
         if base_scores and nova_scores:
             delta = (
                 sum(nova_scores) / len(nova_scores)
                 - sum(base_scores) / len(base_scores)
             )
-            print(f"  NOVA lift:     {'+' if delta >= 0 else ''}{delta:.1%}")
+            print(f"  NOVA lift:        {'+' if delta >= 0 else ''}{delta:.1%}")
         print(f"{'=' * 72}")
+
+    # ── Bracket-aware benchmark methods ──────────────────────────
+
+    def run_gsm8k(self, bracket_size: int = 64) -> BenchmarkResult:
+        """Run GSM8K with bracket inference + mathematical answer verification.
+
+        Generates bracket_size candidates, verifies answers numerically,
+        and brackets among correct candidates on quality.
+        """
+        config = BENCHMARKS["gsm8k"]
+        samples = load_benchmark(config)
+        if not samples:
+            print("  GSM8K: failed to load")
+            return BenchmarkResult("GSM8K", "bracket", 0.0, 0, 0, 0.0)
+
+        scorer = SCORERS["numeric"]
+        bracket = BracketInference(
+            self.model, self.tokenizer,
+            preference_store=getattr(self.agent, "preference_store", None),
+        )
+
+        t0 = time.time()
+        per_question = []
+        n_correct = 0
+
+        for sample in samples:
+            result = bracket.run(
+                sample["question"],
+                n_candidates=bracket_size,
+                verify_answers=True,
+            )
+            predicted = result.get("answer")
+            if predicted is not None:
+                predicted = str(predicted)
+
+            score = scorer(predicted, sample["answer"])
+            n_correct += score > 0.5
+            per_question.append({
+                "index": sample["index"],
+                "question": sample["question"][:200],
+                "ground_truth": sample["answer"][:100],
+                "predicted": predicted,
+                "score": score,
+                "strategy": "bracket",
+                "bracket_size": bracket_size,
+                "n_candidates": result.get("n_candidates", 0),
+            })
+
+        elapsed = time.time() - t0
+        total = len(samples)
+        avg_score = n_correct / max(total, 1)
+
+        return BenchmarkResult(
+            benchmark="GSM8K",
+            mode="bracket",
+            score=avg_score,
+            n_correct=n_correct,
+            n_total=total,
+            elapsed_s=elapsed,
+            per_question=per_question,
+        )
+
+    def run_humaneval(self, bracket_size: int = 64) -> BenchmarkResult:
+        """Run HumanEval with bracket inference + execution testing.
+
+        Generates bracket_size code candidates, executes tests to filter
+        survivors, then brackets survivors on code quality.
+        """
+        config = BENCHMARKS["humaneval"]
+        samples = load_benchmark(config)
+        if not samples:
+            print("  HumanEval: failed to load")
+            return BenchmarkResult("HumanEval", "bracket", 0.0, 0, 0, 0.0)
+
+        scorer = SCORERS["code_pass"]
+        bracket = BracketInference(
+            self.model, self.tokenizer,
+            preference_store=getattr(self.agent, "preference_store", None),
+        )
+
+        t0 = time.time()
+        per_question = []
+        n_correct = 0
+
+        for sample in samples:
+            result = bracket.code_bracket(
+                sample["question"],
+                n_candidates=bracket_size,
+            )
+            predicted = result.get("answer")
+            if predicted is not None:
+                predicted = str(predicted)
+
+            score = scorer(predicted, sample["answer"])
+            n_correct += score > 0.5
+            per_question.append({
+                "index": sample["index"],
+                "question": sample["question"][:200],
+                "ground_truth": sample["answer"][:100],
+                "predicted": predicted,
+                "score": score,
+                "strategy": "bracket_code",
+                "bracket_size": bracket_size,
+            })
+
+        elapsed = time.time() - t0
+        total = len(samples)
+        avg_score = n_correct / max(total, 1)
+
+        return BenchmarkResult(
+            benchmark="HumanEval",
+            mode="bracket",
+            score=avg_score,
+            n_correct=n_correct,
+            n_total=total,
+            elapsed_s=elapsed,
+            per_question=per_question,
+        )
+
+    def run_mmlu(
+        self, bracket_size: int = 16, use_search: bool = False
+    ) -> BenchmarkResult:
+        """Run MMLU with bracket inference and optional search augmentation.
+
+        When use_search=True, each question is first augmented with web
+        search results before bracket inference.
+        """
+        config = BENCHMARKS["mmlu"]
+        samples = load_benchmark(config)
+        if not samples:
+            print("  MMLU: failed to load")
+            return BenchmarkResult("MMLU", "bracket", 0.0, 0, 0, 0.0)
+
+        scorer = SCORERS["exact_match"]
+        bracket = BracketInference(
+            self.model, self.tokenizer,
+            preference_store=getattr(self.agent, "preference_store", None),
+        )
+        orchestrator = ToolOrchestrator() if use_search else None
+        mode = "bracket_search" if use_search else "bracket"
+
+        t0 = time.time()
+        per_question = []
+        n_correct = 0
+
+        for sample in samples:
+            prompt = sample["question"]
+            if orchestrator is not None:
+                prompt = orchestrator.search_and_augment(prompt)
+
+            result = bracket.run(prompt, n_candidates=bracket_size)
+            predicted = result.get("answer")
+            if predicted is not None:
+                predicted = str(predicted)
+
+            score = scorer(predicted, sample["answer"])
+            n_correct += score > 0.5
+            per_question.append({
+                "index": sample["index"],
+                "question": sample["question"][:200],
+                "ground_truth": sample["answer"][:100],
+                "predicted": predicted,
+                "score": score,
+                "strategy": mode,
+                "bracket_size": bracket_size,
+            })
+
+        elapsed = time.time() - t0
+        total = len(samples)
+        avg_score = n_correct / max(total, 1)
+
+        return BenchmarkResult(
+            benchmark="MMLU",
+            mode=mode,
+            score=avg_score,
+            n_correct=n_correct,
+            n_total=total,
+            elapsed_s=elapsed,
+            per_question=per_question,
+        )
+
+    def run_full_suite(self) -> list[BenchmarkResult]:
+        """Run all benchmarks in base, bracket, and bracket+search modes.
+
+        Prints a comparison table showing:
+          - base (no bracket, no strategies)
+          - bracket (bracket inference)
+          - bracket+search (bracket with search augmentation, where applicable)
+          - targets from the NOVA spec
+        """
+        print(f"\n{'=' * 80}")
+        print(f"  NOVA FULL BENCHMARK SUITE — base vs bracket vs bracket+search")
+        print(f"{'=' * 80}")
+
+        all_results: list[BenchmarkResult] = []
+
+        # GSM8K — base vs bracket
+        print(f"\n  --- GSM8K ---")
+        gsm_config = BENCHMARKS["gsm8k"]
+        gsm_samples = load_benchmark(gsm_config)
+        if gsm_samples:
+            gsm_base = self._run_benchmark(
+                "gsm8k", gsm_config, gsm_samples, SCORERS["numeric"], "base"
+            )
+            all_results.append(gsm_base)
+            print(f"  [    base] {gsm_base.score:.1%}")
+
+            gsm_bracket = self.run_gsm8k(bracket_size=64)
+            all_results.append(gsm_bracket)
+            print(f"  [ bracket] {gsm_bracket.score:.1%}")
+
+            target = BENCHMARK_TARGETS["GSM8K"]
+            print(f"  [ target ] {target['low']:.0%}-{target['high']:.0%}")
+
+        # HumanEval — base vs bracket
+        print(f"\n  --- HumanEval ---")
+        he_config = BENCHMARKS["humaneval"]
+        he_samples = load_benchmark(he_config)
+        if he_samples:
+            he_base = self._run_benchmark(
+                "humaneval", he_config, he_samples, SCORERS["code_pass"], "base"
+            )
+            all_results.append(he_base)
+            print(f"  [    base] {he_base.score:.1%}")
+
+            he_bracket = self.run_humaneval(bracket_size=64)
+            all_results.append(he_bracket)
+            print(f"  [ bracket] {he_bracket.score:.1%}")
+
+            target = BENCHMARK_TARGETS["HumanEval"]
+            print(f"  [ target ] {target['low']:.0%}-{target['high']:.0%}")
+
+        # MMLU — base vs bracket vs bracket+search
+        print(f"\n  --- MMLU ---")
+        mmlu_config = BENCHMARKS["mmlu"]
+        mmlu_samples = load_benchmark(mmlu_config)
+        if mmlu_samples:
+            mmlu_base = self._run_benchmark(
+                "mmlu", mmlu_config, mmlu_samples, SCORERS["exact_match"], "base"
+            )
+            all_results.append(mmlu_base)
+            print(f"  [    base] {mmlu_base.score:.1%}")
+
+            mmlu_bracket = self.run_mmlu(bracket_size=16, use_search=False)
+            all_results.append(mmlu_bracket)
+            print(f"  [ bracket] {mmlu_bracket.score:.1%}")
+
+            mmlu_search = self.run_mmlu(bracket_size=16, use_search=True)
+            all_results.append(mmlu_search)
+            print(f"  [bracket+] {mmlu_search.score:.1%}")
+
+            target_base = BENCHMARK_TARGETS["MMLU"]
+            target_search = BENCHMARK_TARGETS["MMLU+search"]
+            print(f"  [ target ] {target_base['low']:.0%}-{target_base['high']:.0%} (no search)")
+            print(f"  [ target ] {target_search['low']:.0%}-{target_search['high']:.0%} (with search)")
+
+        # Summary comparison
+        self._print_target_comparison(all_results)
+        return all_results
+
+    def _print_target_comparison(self, results: list[BenchmarkResult]):
+        """Print side-by-side comparison of results vs spec targets."""
+        print(f"\n{'=' * 80}")
+        print(f"  RESULTS vs TARGETS")
+        print(f"{'=' * 80}")
+        print(
+            f"  {'Benchmark':<15s} {'Mode':<16s} {'Score':>8s} "
+            f"{'Target':>12s} {'Status':>8s}"
+        )
+        print(f"  {'-' * 15} {'-' * 16} {'-' * 8} {'-' * 12} {'-' * 8}")
+
+        for r in results:
+            target_key = r.benchmark
+            if r.mode == "bracket_search":
+                target_key = f"{r.benchmark}+search"
+
+            target = BENCHMARK_TARGETS.get(target_key)
+            if target is None:
+                target_str = "N/A"
+                status = ""
+            else:
+                target_str = f"{target['low']:.0%}-{target['high']:.0%}"
+                if r.score >= target["high"]:
+                    status = "EXCEEDS"
+                elif r.score >= target["low"]:
+                    status = "IN RANGE"
+                else:
+                    status = "BELOW"
+
+            print(
+                f"  {r.benchmark:<15s} {r.mode:<16s} {r.score:>7.1%} "
+                f"{target_str:>12s} {status:>8s}"
+            )
+        print(f"{'=' * 80}")
