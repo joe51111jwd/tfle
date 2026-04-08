@@ -2,11 +2,14 @@
 
 Handles save/resume with time-based checkpointing for spot instance safety.
 Saves model, optimizer, scheduler, scaler, step, and tokens_seen.
+Includes SIGTERM/SIGINT handler for emergency checkpoint on spot preemption.
 """
 
 from __future__ import annotations
 
 import os
+import signal
+import sys
 import time
 import subprocess
 from pathlib import Path
@@ -43,6 +46,67 @@ class CheckpointManager:
         self.keep = keep
         self.prefix = prefix
         self._last_save_time = time.time()
+
+        # state for emergency saves
+        self._model: nn.Module | None = None
+        self._optimizer: torch.optim.Optimizer | None = None
+        self._scheduler: torch.optim.lr_scheduler.LRScheduler | None = None
+        self._scaler: torch.amp.GradScaler | None = None
+        self._step: int = 0
+        self._tokens: int = 0
+
+        signal.signal(signal.SIGTERM, self._sigterm_handler)
+        signal.signal(signal.SIGINT, self._sigterm_handler)
+
+    def register_model(
+        self,
+        model: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
+        scaler: torch.amp.GradScaler | None = None,
+        step: int = 0,
+        tokens: int = 0,
+    ):
+        """Register training state so the SIGTERM handler knows what to save."""
+        self._model = model
+        self._optimizer = optimizer
+        self._scheduler = scheduler
+        self._scaler = scaler
+        self._step = step
+        self._tokens = tokens
+
+    def force_save(self) -> Path | None:
+        """Emergency checkpoint from whatever state is registered."""
+        if self._model is None or self._optimizer is None:
+            print("  force_save: no model registered, skipping")
+            return None
+
+        raw = self._model.module if hasattr(self._model, "module") else self._model
+        ckpt_path = self.save_dir / f"{self.prefix}_emergency_step{self._step}.pt"
+
+        save_dict: dict = {
+            "model_state_dict": raw.state_dict(),
+            "optimizer_state_dict": self._optimizer.state_dict(),
+            "step": self._step,
+            "tokens_seen": self._tokens,
+            "best_val_loss": float("inf"),
+            "config": {},
+        }
+        if self._scheduler is not None:
+            save_dict["scheduler_state_dict"] = self._scheduler.state_dict()
+        if self._scaler is not None:
+            save_dict["scaler_state_dict"] = self._scaler.state_dict()
+
+        torch.save(save_dict, str(ckpt_path))
+        print(f"  Emergency checkpoint saved: {ckpt_path.name} (step {self._step})")
+        return ckpt_path
+
+    def _sigterm_handler(self, signum, frame):
+        """Emergency checkpoint on spot preemption."""
+        sig_name = signal.Signals(signum).name
+        print(f"\n  {sig_name} received - emergency checkpoint...")
+        self.force_save()
+        sys.exit(0)
 
     def should_save(self) -> bool:
         elapsed = (time.time() - self._last_save_time) / 60.0

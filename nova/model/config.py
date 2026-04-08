@@ -51,6 +51,42 @@ class NovaConfig:
 
 NOVA_2_4B = NovaConfig()
 
+NOVA_1B = NovaConfig(
+    n_layers=24,
+    hidden_dim=1728,
+    vocab_size=151646,
+    n_heads=16,
+    n_kv_heads=4,
+    d_ff=4608,
+    mamba_d_state=16,
+    mamba_d_conv=4,
+    mamba_expand=2,
+    molora_experts=5,
+    molora_top_k=2,
+    molora_rank=16,
+    molora_alpha=32.0,
+    max_seq_len=4096,
+    rope_theta=500000.0,
+)
+
+NOVA_1B_QWEN = NovaConfig(
+    n_layers=24,
+    hidden_dim=1728,
+    vocab_size=151650,  # 151646 + 4 special tokens (<think>, </think>, <answer>, </answer>)
+    n_heads=16,
+    n_kv_heads=4,
+    d_ff=4608,
+    mamba_d_state=16,
+    mamba_d_conv=4,
+    mamba_expand=2,
+    molora_experts=5,
+    molora_top_k=2,
+    molora_rank=16,
+    molora_alpha=32.0,
+    max_seq_len=4096,
+    rope_theta=500000.0,
+)
+
 NOVA_10M = NovaConfig(
     n_layers=12,
     hidden_dim=640,
