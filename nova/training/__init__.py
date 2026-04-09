@@ -1,19 +1,24 @@
 """NOVA 2.4B post-training modules.
 
 Modules:
-  distill          - Reasoning distillation with LoRA
-  rewards          - Math, code, and format reward functions
-  grpo             - Dr. GRPO trainer
-  block_local_tfle - Block-local TFLE (key innovation)
-  tfle_grpo        - TFLE-GRPO integration
-  swt              - Sleep-wake training for continual learning
-  pretrain_stages  - 3-stage pretraining (synthetic, filtered, cooldown)
-  dpo              - Direct Preference Optimization trainer
-  self_dpo         - Self-DPO learning loop (preference pairs -> DPO)
-  preference_store - Persistent JSONL storage for bracket matchups
-  prune            - Model pruning (CONDITIONAL)
-  ternarize        - Post-prune ternarization (CONDITIONAL)
-  recover          - STE recovery training (CONDITIONAL)
+  distill           - Reasoning distillation with LoRA
+  rewards           - Math, code, and format reward functions
+  grpo              - Dr. GRPO trainer
+  block_local_tfle  - Block-local TFLE (key innovation)
+  tfle_grpo         - TFLE-GRPO integration
+  swt               - Sleep-wake training for continual learning
+  pretrain_stages   - 3-stage pretraining (synthetic, filtered, cooldown)
+  dpo               - Direct Preference Optimization trainer
+  self_dpo          - Self-DPO learning loop (preference pairs -> DPO)
+  preference_store  - Persistent JSONL storage for bracket matchups
+  prune             - Model pruning (CONDITIONAL)
+  ternarize         - Post-prune ternarization (CONDITIONAL)
+  recover           - STE recovery training (CONDITIONAL)
+  adaptive_kl       - Adaptive KL distillation losses (forward + reverse)
+  curriculum        - Sequence-length and batch-size curricula
+  wsd_scheduler     - Warmup-Stable-Decay LR scheduler
+  liger_integration - Liger fused-kernel monkey-patches
+  cached_dataset    - Memory-mapped teacher logit cache + sequence packing
 """
 
 # Lazy imports to avoid circular deps and missing optional modules
@@ -75,5 +80,45 @@ except ImportError:
 
 try:
     from .recover import RecoveryTrainer, RecoveryConfig
+except ImportError:
+    pass
+
+try:
+    from .adaptive_kl import (
+        adaptive_kl_loss_sparse,
+        adaptive_kl_loss_full,
+        combined_distillation_loss,
+        temperature_anneal,
+    )
+except ImportError:
+    pass
+
+try:
+    from .curriculum import (
+        get_current_seq_len,
+        SequenceLengthCurriculum,
+        BatchSizeCurriculum,
+    )
+except ImportError:
+    pass
+
+try:
+    from .wsd_scheduler import WSDScheduler
+except ImportError:
+    pass
+
+try:
+    from .liger_integration import patch_with_liger, get_liger_loss, HAS_LIGER
+except ImportError:
+    pass
+
+try:
+    from .cached_dataset import (
+        CachedDistillationDataset,
+        PackedSequenceDataset,
+        PackedBatch,
+        pack_documents,
+        make_dataloader,
+    )
 except ImportError:
     pass
